@@ -28,12 +28,17 @@ struct guest_win_kernel_objects{
 static void rk_win_init(void)
 {
 	//Get Windows Kernel Address From guest
+	ulong  rbx;
+	virt_t base;
+	
+	current->vmctl.read_general_reg (GENERAL_REG_RBX, &rbx);
+	base = (virt_t)rbx;
 }
 
 static void
 vmmcall_rk_win_init (void)
 {
-	vmmcall_register ("rk_win_init", log_set_buf);
+	vmmcall_register ("rk_win_init", rk_win_init);
 }
 
 INITFUNC ("vmmcal0", vmmcall_rk_win_init);
