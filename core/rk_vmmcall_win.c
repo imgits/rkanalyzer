@@ -27,19 +27,20 @@ struct guest_win_kernel_objects win_ko;
 static void dump_ko(void)
 {
 	printf("[RKAnalyzer]Kernel Objects Dump:\n");
-	printf("[RKAnalyzer]pSDT = 0x%X\n", win_ko.pSDT);
-	printf("[RKAnalyzer]pSSDT = 0x%X\n", win_ko.pSSDT);
-	printf("[RKAnalyzer]pIDT = 0x%X\n", win_ko.pIDT);
-	printf("[RKAnalyzer]pKernelCodeStart = 0x%X\n", win_ko.pKernelCodeStart);
-	printf("[RKAnalyzer]pKernelCodeEnd = 0x%X\n", win_ko.pKernelCodeEnd);
+	printf("[RKAnalyzer]pSDT = 0x%lX\n", win_ko.pSDT);
+	printf("[RKAnalyzer]pSSDT = 0x%lX\n", win_ko.pSSDT);
+	printf("[RKAnalyzer]pIDT = 0x%lX\n", win_ko.pIDT);
+	printf("[RKAnalyzer]pKernelCodeStart = 0x%lX\n", win_ko.pKernelCodeStart);
+	printf("[RKAnalyzer]pKernelCodeEnd = 0x%lX\n", win_ko.pKernelCodeEnd);
 }
 
 static void rk_win_init(void)
 {
 	//Get Windows Kernel Address From guest
+	int i;
 	ulong  rbx;
 	virt_t base;
-	unsigned char* buf = &win_ko;
+	unsigned char* buf = (unsigned char*)&win_ko;
 	
 	current->vmctl.read_general_reg (GENERAL_REG_RBX, &rbx);
 	base = (virt_t)rbx;
@@ -51,9 +52,10 @@ static void rk_win_init(void)
 	}
 
 	dump_ko();
+	return;
 	
 init_failed:
-	memset(win_ko, 0, sizeof(struct guest_win_kernel_objects));
+	memset(&win_ko, 0, sizeof(struct guest_win_kernel_objects));
 	printf("[RKAnalyzer]Get Kernel Information Failed!\n");
 	return;
 }
@@ -62,7 +64,7 @@ static void
 vmmcall_rk_win_init (void)
 {
 	vmmcall_register ("rk_win_init", rk_win_init);
-	memset(win_ko, 0, sizeof(struct guest_win_kernel_objects));
+	memset(&win_ko, 0, sizeof(struct guest_win_kernel_objects));
 }
 
 INITFUNC ("vmmcal0", vmmcall_rk_win_init);
