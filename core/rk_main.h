@@ -10,6 +10,8 @@
 #include "types.h"
 #include "list.h"
 
+#ifdef RK_ANALYZER
+
 #define AREA_TAG_MAXLEN 20
 
 struct mm_protected_area;
@@ -27,8 +29,12 @@ struct mm_protected_area{
 	mmprotect_callback callback_func;
 };
 
+
+
 bool rk_protect_mmarea(virt_t startaddr, virt_t endaddr, char* areatag, mmprotect_callback callback_func);
 bool rk_is_addr_protected(virt_t virtaddr);
 bool rk_callfunc_if_addr_protected(virt_t virtaddr);
+
+#endif
 
 #endif

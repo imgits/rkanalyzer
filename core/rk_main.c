@@ -13,6 +13,7 @@
 #include "printf.h"
 #include "constants.h"
 
+#ifdef RK_ANALYZER
 
 static LIST1_DEFINE_HEAD (struct mm_protected_area, list_mmarea);
 
@@ -22,6 +23,7 @@ rk_init_global (void)
 	LIST1_HEAD_INIT (list_mmarea);
 	printf("MM Protect Area List Initialized...\n");
 }
+
 
 bool rk_protect_mmarea(virt_t startaddr, virt_t endaddr, char* areatag, mmprotect_callback callback_func)
 {
@@ -100,3 +102,5 @@ bool rk_callfunc_if_addr_protected(virt_t virtaddr)
 }
 
 INITFUNC("global4", rk_init_global);
+
+#endif
