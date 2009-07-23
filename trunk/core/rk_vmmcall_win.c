@@ -14,6 +14,8 @@
 #include "string.h"
 #include "vmmcall.h"
 
+#ifdef RK_ANALYZER
+
 struct guest_win_kernel_objects{
 	virt_t pSDT;
 	virt_t pSSDT;
@@ -65,6 +67,9 @@ vmmcall_rk_win_init (void)
 {
 	vmmcall_register ("rk_win_init", rk_win_init);
 	memset(&win_ko, 0, sizeof(struct guest_win_kernel_objects));
+
 }
 
 INITFUNC ("vmmcal0", vmmcall_rk_win_init);
+
+#endif
