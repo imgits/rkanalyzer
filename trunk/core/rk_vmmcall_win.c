@@ -13,6 +13,7 @@
 #include "printf.h"
 #include "string.h"
 #include "vmmcall.h"
+#include "rk_main.h"
 
 #ifdef RK_ANALYZER
 
@@ -25,6 +26,12 @@ struct guest_win_kernel_objects{
 };
 
 struct guest_win_kernel_objects win_ko;
+
+static void mmprotect_callback_win(struct mm_protected_area *mmarea, virt_t addr)
+{
+	printf("[RKAnalyzer]Access Violation at 0x%lX\n", addr);
+	return;
+}
 
 static void dump_ko(void)
 {
@@ -54,6 +61,11 @@ static void rk_win_init(void)
 	}
 
 	dump_ko();
+
+	if(!rk_protect_mmarea(win_ko.pSSDT, win_ko.pSSDT + 4,"SSDT", mmprotect_callback_win)){
+		printf("[RKAnalyzer]Failed Adding MM Area...\n");
+	}
+	
 	return;
 	
 init_failed:

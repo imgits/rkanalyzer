@@ -53,6 +53,8 @@
 #include "vt_main.h"
 #include "vt_regs.h"
 #include "vt_vmcs.h"
+#include "rk_main.h"
+#include "mm.h"
 
 enum vt__status {
 	VT__VMENTRY_SUCCESS,
@@ -160,9 +162,15 @@ do_exception (void)
 		switch (vii.s.type) {
 		case INTR_INFO_TYPE_HARD_EXCEPTION:
 			STATUS_UPDATE (asm_lock_incl (&stat_hwexcnt));
+#ifdef RK_ANALYZER
+			if (vii.s.vector == EXCEPTION_DB &&
+			    (current->rk_tf.tf || current->u.vt.vr.sw.enable))
+				break;
+#else
 			if (vii.s.vector == EXCEPTION_DB &&
 			    current->u.vt.vr.sw.enable)
 				break;
+#endif
 			if (vii.s.vector == EXCEPTION_PF) {
 				ulong err, cr2;
 
@@ -368,6 +376,31 @@ vt__vm_run_with_tf (void)
 	rflags &= ~RFLAGS_TF_BIT;
 	vt_write_flags (rflags);
 }
+
+#ifdef RK_ANALYZER
+
+/* FIXME: bad handling of TF bit */
+static void
+vt__vm_run_with_rk_tf (void)
+{
+	ulong rflags;
+
+	vt_read_flags (&rflags);
+	rflags |= RFLAGS_TF_BIT;
+	vt_write_flags (rflags);
+
+	rk_entry_before_tf();
+
+	vt__vm_run ();
+
+	rk_ret_from_tf();
+
+	vt_read_flags (&rflags);
+	rflags &= ~RFLAGS_TF_BIT;
+	vt_write_flags (rflags);
+}
+
+#endif
 
 static void
 vt__event_delivery_check (void)
@@ -885,6 +918,36 @@ vt_mainloop (void)
 			*/
 		}
 		/* when the state is switching, do single step */
+#ifdef RK_ANALYZER
+		if (current->rk_tf.tf){
+			vt__nmi ();
+			vt__event_delivery_setup ();
+			vt__vm_run_with_rk_tf ();
+			cpu_mmu_spt_tlbflush ();
+			vt__event_delivery_check ();
+			vt__exit_reason ();
+			vt__event_delivery_update ();
+			current->rk_tf.tf = false;
+		}else{
+			if (current->u.vt.vr.sw.enable) {
+				vt__nmi ();
+				vt__event_delivery_setup ();
+				vt__vm_run_with_tf ();
+				cpu_mmu_spt_tlbflush ();
+				vt__event_delivery_check ();
+				vt__exit_reason ();
+				vt__event_delivery_update ();
+			} else {	/* not switching */
+				vt__nmi ();
+				vt__event_delivery_setup ();
+				vt__vm_run ();
+				cpu_mmu_spt_tlbflush ();
+				vt__event_delivery_check ();
+				vt__exit_reason ();
+				vt__event_delivery_update ();
+			}
+		}
+#else
 		if (current->u.vt.vr.sw.enable) {
 			vt__nmi ();
 			vt__event_delivery_setup ();
@@ -902,6 +965,7 @@ vt_mainloop (void)
 			vt__exit_reason ();
 			vt__event_delivery_update ();
 		}
+#endif
 	}
 }
 
