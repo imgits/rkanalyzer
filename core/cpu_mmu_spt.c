@@ -43,6 +43,9 @@
 #include "spinlock.h"
 #include "string.h"
 #include "vmmcall_status.h"
+#include "rk_main.h"
+#include "cpu_interpreter.h"
+#include "vmmerr.h"
 
 struct map_page_data1 {
 	unsigned int write : 1;
@@ -2339,6 +2342,14 @@ cpu_mmu_spt_pagefault (ulong err, ulong cr2)
 	struct map_page_data1 m1;
 	struct map_page_data2 m2[5];
 	u64 efer, gfns[5], entries[5];
+#ifdef RK_ANALYZER
+	enum rk_result rk_res;
+	pmap_t m;
+	u64 pte;
+	ulong ip;
+	ulong cr0toshadow;
+	bool no_wr_fault_dispatch = false;
+#endif
 
 	current->vmctl.read_control_reg (CONTROL_REG_CR0, &cr0);
 	current->vmctl.read_control_reg (CONTROL_REG_CR3, &cr3);
@@ -2348,14 +2359,58 @@ cpu_mmu_spt_pagefault (ulong err, ulong cr2)
 	us = !!(err & PAGEFAULT_ERR_US_BIT);
 	ex = !!(err & PAGEFAULT_ERR_ID_BIT);
 	wp = !!(cr0 & CR0_WP_BIT);
+
+#ifdef RK_ANALYZER		
+	//Modified by Tyrael here.
+	//Only Intercept in supervisor mode,and Present pages.
+	if(wr && (!us) && (err & PAGEFAULT_ERR_P_BIT)){	
+		current->vmctl.read_ip(&ip);	
+		rk_res = rk_callfunc_if_addr_protected(cr2);
+		if((rk_res == RK_UNPROTECTED_IN_PROTECTED_AREA) || (rk_res == RK_PROTECTED) || (rk_res == RK_PROTECTED_BYSYSTEM)){
+			printf("protected: errorcode:%lx, eip=0x%lx\n", err, ip);
+			pmap_open_vmm (&m, current->spt.cr3tbl_phys, current->spt.levels);	
+			pmap_seek (&m, cr2, 1);
+			pte = pmap_read(&m);
+			printf("pte = 0x%lx\n", pte);
+			pmap_close (&m);
+			//We should let the write go, so disable CR0.WP
+			current->rk_tf.tf = true;
+			no_wr_fault_dispatch = true;
+			current->rk_tf.debuglog = true;
+			current->rk_tf.addr = cr2;
+		}
+	}
+#endif
+
 	r = cpu_mmu_get_pte (cr2, cr0, cr3, cr4, efer, wr, us, ex, entries,
 			     &levels);
+
 	switch (r) {
 	case VMMERR_PAGE_NOT_PRESENT:
 		generate_pf_nopage (err, cr2);
 		break;
 	case VMMERR_PAGE_NOT_ACCESSIBLE:
+
+#ifdef RK_ANALYZER
+		if(wr && (!us) && (!no_wr_fault_dispatch)){	
+			current->vmctl.read_ip(&ip);	
+			rk_res = rk_callfunc_if_addr_protected(cr2);
+			if((rk_res == RK_UNPROTECTED_IN_PROTECTED_AREA) || (rk_res == RK_PROTECTED) || (rk_res == RK_PROTECTED_BYSYSTEM)){
+				printf("protected: errorcode:%lx, eip=0x%lx\n", err, ip);
+				//We should let the write go, so disable CR0.WP
+				current->rk_tf.tf = true;
+				no_wr_fault_dispatch = true;
+				current->rk_tf.debuglog = true;
+				current->rk_tf.addr = cr2;
+			}
+		}
+
+		if(!no_wr_fault_dispatch){
+			generate_pf_noaccess (err, cr2);
+		}
+#else
 		generate_pf_noaccess (err, cr2);
+#endif
 		break;
 	case VMMERR_PAGE_BAD_RESERVED_BIT:
 		generate_pf_reserved (err, cr2);
