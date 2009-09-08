@@ -26,17 +26,15 @@ struct mm_protected_area;
 
 typedef void (*mmprotect_callback) (struct mm_protected_area *, virt_t );
 
-// A Protected Memory Area. The startaddr and endaddr need not to be in the same page.
+// A Protected Memory Area. The startaddr and endaddr must be in the same page.
 struct mm_protected_area{
 	LIST1_DEFINE (struct mm_protected_area);
 	virt_t	startaddr;
 	virt_t	endaddr;
+	u64 gfns;
 	char		areatag[AREA_TAG_MAXLEN + 1];
-	bool		detailed;
-	char**	detailtags;
 	mmprotect_callback callback_func;
-	bool 	page_wr_setbysystem[2];			//Is the wr bit set by us or the system
-							//(first and last page, as these two pages may be fragile.)
+	bool 	page_wr_setbysystem;			//Is the wr bit set by us or the system
 };
 
 struct rk_tf_state{
@@ -47,9 +45,14 @@ struct rk_tf_state{
 	u64 originalpte;				//Original PTE.we write it back after TF
 };
 
+// The startaddr and endaddr could be in different page. The function will handle it and split them to different pages.
 bool rk_protect_mmarea(virt_t startaddr, virt_t endaddr, char* areatag, mmprotect_callback callback_func);
+void rk_manipulate_mmarea_if_need(virt_t newvirtaddr, u64 gfns);
+
 enum rk_result rk_is_addr_protected(virt_t virtaddr);
 enum rk_result rk_callfunc_if_addr_protected(virt_t virtaddr);
+struct mm_protected_area* rk_get_mmarea_byvirtaddr_insamepage(virt_t virtaddr);
+struct mm_protected_area* rk_get_mmarea_bygfns(u64 gfns);
 void rk_ret_from_tf(void);
 void rk_entry_before_tf(void);
 

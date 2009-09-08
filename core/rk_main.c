@@ -34,9 +34,8 @@ bool rk_protect_mmarea(virt_t startaddr, virt_t endaddr, char* areatag, mmprotec
 
 	struct mm_protected_area *mmarea;
 	int areataglen;
-	ulong cr3;
-	u64 pte;
-	virt_t currentaddr;
+	u64 pte, gfns;
+	virt_t currentaddr, currentendaddr, nextaddr;
 	pmap_t m;
 
 	if(startaddr > endaddr){
@@ -50,73 +49,121 @@ bool rk_protect_mmarea(virt_t startaddr, virt_t endaddr, char* areatag, mmprotec
 		return false;
 	}
 
-	//Step 1
-	mmarea = alloc(sizeof *mmarea);
-	mmarea->startaddr = startaddr;
-	mmarea->endaddr = endaddr;
-	mmarea->callback_func = callback_func;
-	if(areatag){
-		areataglen = (strlen(areatag) > AREA_TAG_MAXLEN ? AREA_TAG_MAXLEN : strlen(areatag));
-		memcpy(mmarea->areatag, areatag, sizeof(char) * areataglen);
-	}else{
-		memset(mmarea->areatag, 0, AREA_TAG_MAXLEN);
-	}
-	mmarea->detailed = false;
-	mmarea->detailtags = NULL;
-
-	LIST1_ADD (list_mmarea, mmarea);
-	
-	//Step 2
-	//FIXME : Low Performance. Should set by page.
 	pmap_open_vmm (&m, current->spt.cr3tbl_phys, current->spt.levels);
-	
-	pmap_seek (&m, startaddr, 1);
-	pte = pmap_read(&m);
-	if((pte & PTE_RW_BIT) != 0){
-		mmarea->page_wr_setbysystem[0] = false;
-	}else{
-		if(rk_is_addr_protected(startaddr) == RK_UNPROTECTED_IN_PROTECTED_AREA){
-			mmarea->page_wr_setbysystem[0] = false;
-		}else{
-			mmarea->page_wr_setbysystem[0] = true;
-		}
-	}
-	pte &= (~PTE_RW_BIT);
-	pmap_write (&m, pte, 0xFFF);
 
-	for(currentaddr = startaddr + 1; currentaddr < endaddr; currentaddr ++){
+	currentaddr = startaddr;
+	while(currentaddr <= endaddr){
+		mmarea = alloc(sizeof(struct mm_protected_area));
+
+		//TODO:Add Support for Large Pages(4M)
+
+		//Modify Page Table
 		pmap_seek (&m, currentaddr, 1);
-		pte = pmap_read(&m) & (~PTE_RW_BIT);
-		pmap_write (&m, pte, 0xFFF);
-	}
-
-	pmap_seek (&m, endaddr, 1);
-	pte = pmap_read(&m);
-	if((pte & PTE_RW_BIT) != 0){
-		mmarea->page_wr_setbysystem[1] = false;
-	}else{
-		if(rk_is_addr_protected(endaddr) == RK_UNPROTECTED_IN_PROTECTED_AREA){
-			mmarea->page_wr_setbysystem[1] = false;
+		pte = pmap_read(&m);
+		if((pte & PTE_RW_BIT) != 0){
+			mmarea->page_wr_setbysystem = false;
 		}else{
-			mmarea->page_wr_setbysystem[1] = true;
+			if(rk_is_addr_protected(startaddr) == RK_UNPROTECTED_IN_PROTECTED_AREA){
+				mmarea->page_wr_setbysystem = false;
+			}else{
+				mmarea->page_wr_setbysystem = true;
+			}
 		}
-	}
-	pte &= (~PTE_RW_BIT);
-	pmap_write (&m, pte, 0xFFF);
+		pte = pte & (~PTE_RW_BIT);
+		pmap_write (&m, pte, 0xFFF);
 
+		gfns = (pte & PTE_ADDR_MASK64) >> PAGESIZE_SHIFT;
+		currentendaddr = currentaddr | ~((0xFFFFFFFF >> PAGESIZE_SHIFT) << PAGESIZE_SHIFT);
+		nextaddr = currentendaddr + 1;
+		if(currentendaddr > endaddr){
+			currentendaddr = endaddr;
+		}
+
+		printf("Current Addr = 0x%lX\n", currentaddr);
+		printf("Current End Addr = 0x%lX\n", currentendaddr);
+		printf("Next Addr = 0x%lX\n", nextaddr);
+
+		//Set mmarea
+		mmarea->startaddr = currentaddr;
+		mmarea->endaddr = currentendaddr;
+		mmarea->gfns = gfns;
+		mmarea->callback_func = callback_func;
+		if(areatag){
+			areataglen = (strlen(areatag) > AREA_TAG_MAXLEN ? AREA_TAG_MAXLEN : strlen(areatag));
+			memcpy(mmarea->areatag, areatag, sizeof(char) * areataglen);
+		}else{
+			memset(mmarea->areatag, 0, AREA_TAG_MAXLEN);
+		}
+
+		LIST1_ADD (list_mmarea, mmarea);
+
+		if(nextaddr == 0){
+			break;
+		}
+		currentaddr = nextaddr;
+	}
+	
 	pmap_close (&m);
 
 	return true;
 	
 }
 
+void rk_manipulate_mmarea_if_need(virt_t newvirtaddr, u64 gfns){
+
+	//TODO:Consider the condition that a Large Page(4M) contains a Small Page(4K)
+
+	struct mm_protected_area *mmarea_gfns;
+	struct mm_protected_area *mmarea_virtaddr;
+	virt_t newstartaddr;
+	virt_t newendaddr;
+
+	//Step1. Check gfns is in protect mmarea
+	mmarea_gfns = rk_get_mmarea_bygfns(gfns);
+	mmarea_virtaddr = rk_get_mmarea_byvirtaddr_insamepage(newvirtaddr);
+
+	if(mmarea_gfns == NULL){
+		//If the virtaddr is in protect mmarea but the gfns is not, it means that the mmarea has expired.
+		//Remove it if needed.
+		if(mmarea_virtaddr != NULL){
+			LIST1_DEL(list_mmarea, mmarea_virtaddr);
+			free(mmarea_virtaddr);
+		}
+		return;
+	}
+
+	//Step2. Check virtaddr is not in protect mmarea
+	if(mmarea_virtaddr != NULL){
+		if(mmarea_virtaddr->gfns != gfns){
+			//different gfns. the memory area has been remapped since last record.
+			//so we should change the mapping.delete last one and add new one.
+			LIST1_DEL(list_mmarea, mmarea_virtaddr);
+			free(mmarea_virtaddr);
+			goto duplicate;
+		}
+		//same gfns. no need to add it again.
+		return;
+	}
+
+
+duplicate:
+	//Step3. Do Duplicate
+	printf("Guest Tries to map protected physical page, gfns = %llX, virtaddr = %lX\n", gfns, newvirtaddr);
+	newstartaddr = ((newvirtaddr >> PAGESIZE_SHIFT) << (PAGESIZE_SHIFT)) | (mmarea_gfns->startaddr & ~((0xFFFFFFFF >> PAGESIZE_SHIFT) << PAGESIZE_SHIFT));
+	newendaddr = ((newvirtaddr >> PAGESIZE_SHIFT) << (PAGESIZE_SHIFT)) | (mmarea_gfns->endaddr & ~((0xFFFFFFFF >> PAGESIZE_SHIFT) << PAGESIZE_SHIFT));
+	printf("Duplicate MMProtect Area, start = %lX, end = %lX\n", newstartaddr, newendaddr);
+	rk_protect_mmarea(newstartaddr, newendaddr, mmarea_gfns->areatag, mmarea_gfns->callback_func);
+}
+
 enum rk_result rk_is_addr_protected(virt_t virtaddr)
 {
 	struct mm_protected_area *mmarea;
-	
+
+	//TODO:Add Support for Large Pages(4M)
+
 	LIST1_FOREACH (list_mmarea, mmarea) {
 		if((virtaddr >= mmarea->startaddr) && (virtaddr <= mmarea->endaddr)){
-			if(mmarea->page_wr_setbysystem[0])
+			if(!mmarea->page_wr_setbysystem)
 				return RK_PROTECTED;
 			else
 				return RK_PROTECTED_BYSYSTEM;
@@ -126,14 +173,14 @@ enum rk_result rk_is_addr_protected(virt_t virtaddr)
 	LIST1_FOREACH (list_mmarea, mmarea) {
 		if(virtaddr < mmarea->startaddr){
 			if((virtaddr >> PAGESIZE_SHIFT) == (mmarea->startaddr >> PAGESIZE_SHIFT)){
-				if(mmarea->page_wr_setbysystem[0])
+				if(!mmarea->page_wr_setbysystem)
 					return RK_UNPROTECTED_IN_PROTECTED_AREA;
 				else
 					return RK_UNPROTECTED_IN_PROTECTED_AREA_BYSYSTEM;
 			}
 		}else if(virtaddr > mmarea->endaddr){
 			if((virtaddr >> PAGESIZE_SHIFT) == (mmarea->endaddr >> PAGESIZE_SHIFT)){
-				if(mmarea->page_wr_setbysystem[1])
+				if(!mmarea->page_wr_setbysystem)
 					return RK_UNPROTECTED_IN_PROTECTED_AREA;
 				else
 					return RK_UNPROTECTED_IN_PROTECTED_AREA_BYSYSTEM;
@@ -150,7 +197,7 @@ enum rk_result rk_callfunc_if_addr_protected(virt_t virtaddr)
 	
 	LIST1_FOREACH (list_mmarea, mmarea) {
 		if((virtaddr >= mmarea->startaddr) && (virtaddr <= mmarea->endaddr)){
-			if(mmarea->page_wr_setbysystem[0]){
+			if(!mmarea->page_wr_setbysystem){
 				mmarea->callback_func(mmarea, virtaddr);
 				return RK_PROTECTED;
 			}else{
@@ -163,14 +210,14 @@ enum rk_result rk_callfunc_if_addr_protected(virt_t virtaddr)
 	LIST1_FOREACH (list_mmarea, mmarea) {
 		if(virtaddr < mmarea->startaddr){
 			if((virtaddr >> PAGESIZE_SHIFT) == (mmarea->startaddr >> PAGESIZE_SHIFT)){
-				if(mmarea->page_wr_setbysystem[0])
+				if(!mmarea->page_wr_setbysystem)
 					return RK_UNPROTECTED_IN_PROTECTED_AREA;
 				else
 					return RK_UNPROTECTED_IN_PROTECTED_AREA_BYSYSTEM;
 			}
 		}else if(virtaddr > mmarea->endaddr){
 			if((virtaddr >> PAGESIZE_SHIFT) == (mmarea->endaddr >> PAGESIZE_SHIFT)){
-				if(mmarea->page_wr_setbysystem[1])
+				if(!mmarea->page_wr_setbysystem)
 					return RK_UNPROTECTED_IN_PROTECTED_AREA;
 				else
 					return RK_UNPROTECTED_IN_PROTECTED_AREA_BYSYSTEM;
@@ -179,6 +226,43 @@ enum rk_result rk_callfunc_if_addr_protected(virt_t virtaddr)
 	}
 
 	return RK_UNPROTECTED_AREA;
+}
+
+struct mm_protected_area* rk_get_mmarea_byvirtaddr_insamepage(virt_t virtaddr){
+	struct mm_protected_area *mmarea;
+	
+	LIST1_FOREACH (list_mmarea, mmarea) {
+		if((virtaddr >= mmarea->startaddr) && (virtaddr <= mmarea->endaddr)){
+			return mmarea;
+		}
+	}
+
+	LIST1_FOREACH (list_mmarea, mmarea) {
+		if(virtaddr < mmarea->startaddr){
+			if((virtaddr >> PAGESIZE_SHIFT) == (mmarea->startaddr >> PAGESIZE_SHIFT)){
+				return mmarea;
+			}
+		}else if(virtaddr > mmarea->endaddr){
+			if((virtaddr >> PAGESIZE_SHIFT) == (mmarea->endaddr >> PAGESIZE_SHIFT)){
+				return mmarea;
+			}
+		}
+	}
+
+	return NULL;
+}
+
+struct mm_protected_area* rk_get_mmarea_bygfns(u64 gfns){
+
+	struct mm_protected_area *mmarea;
+
+	LIST1_FOREACH (list_mmarea, mmarea) {
+		if(mmarea->gfns == gfns){
+			return mmarea;
+		}
+	}
+	
+	return NULL;
 }
 
 void rk_entry_before_tf(void)

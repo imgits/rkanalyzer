@@ -20,6 +20,7 @@
 struct guest_win_kernel_objects{
 	virt_t pSDT;
 	virt_t pSSDT;
+	unsigned long int NumberOfService;
 	virt_t pIDT;
 	virt_t pKernelCodeStart;
 	virt_t pKernelCodeEnd;
@@ -27,9 +28,16 @@ struct guest_win_kernel_objects{
 
 struct guest_win_kernel_objects win_ko;
 
-static void mmprotect_callback_win(struct mm_protected_area *mmarea, virt_t addr)
+static void rk_win_readfromguest()
 {
-	printf("[RKAnalyzer]Access Violation at 0x%lX\n", addr);
+	//Parse the PE Section
+	//Dump all exported functions.
+	
+}
+
+static void mmprotect_callback_win_ssdt(struct mm_protected_area *mmarea, virt_t addr)
+{
+	printf("[RKAnalyzer][SSDT]Access Violation at 0x%lX\n", addr);
 	return;
 }
 
@@ -38,6 +46,7 @@ static void dump_ko(void)
 	printf("[RKAnalyzer]Kernel Objects Dump:\n");
 	printf("[RKAnalyzer]pSDT = 0x%lX\n", win_ko.pSDT);
 	printf("[RKAnalyzer]pSSDT = 0x%lX\n", win_ko.pSSDT);
+	printf("[RKAnalyzer]NumberOfService = %ld\n", win_ko.NumberOfService);
 	printf("[RKAnalyzer]pIDT = 0x%lX\n", win_ko.pIDT);
 	printf("[RKAnalyzer]pKernelCodeStart = 0x%lX\n", win_ko.pKernelCodeStart);
 	printf("[RKAnalyzer]pKernelCodeEnd = 0x%lX\n", win_ko.pKernelCodeEnd);
@@ -62,7 +71,7 @@ static void rk_win_init(void)
 
 	dump_ko();
 
-	if(!rk_protect_mmarea(win_ko.pSSDT, win_ko.pSSDT + 4,"SSDT", mmprotect_callback_win)){
+	if(!rk_protect_mmarea(win_ko.pSSDT, win_ko.pSSDT + 4 * win_ko.NumberOfService,"SSDT", mmprotect_callback_win_ssdt)){
 		printf("[RKAnalyzer]Failed Adding MM Area...\n");
 	}
 	
