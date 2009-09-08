@@ -2343,7 +2343,7 @@ cpu_mmu_spt_pagefault (ulong err, ulong cr2)
 	struct map_page_data2 m2[5];
 	u64 efer, gfns[5], entries[5];
 #ifdef RK_ANALYZER
-	enum rk_result rk_res;
+	enum rk_result rk_res,rk_res2;
 	pmap_t m;
 	u64 pte;
 	ulong ip;
@@ -2371,7 +2371,7 @@ cpu_mmu_spt_pagefault (ulong err, ulong cr2)
 			pmap_open_vmm (&m, current->spt.cr3tbl_phys, current->spt.levels);	
 			pmap_seek (&m, cr2, 1);
 			pte = pmap_read(&m);
-			printf("pte = 0x%lx\n", pte);
+			printf("pte = 0x%llx\n", pte);
 			pmap_close (&m);
 			//We should let the write go, so disable CR0.WP
 			current->rk_tf.tf = true;
@@ -2423,8 +2423,12 @@ cpu_mmu_spt_pagefault (ulong err, ulong cr2)
 		set_m2 (entries, levels, m2);
 		set_gfns (entries, levels, gfns);
 		mmio_lock ();
-		if (!mmio_access_page (gfns[0] << PAGESIZE_SHIFT))
+		if (!mmio_access_page (gfns[0] << PAGESIZE_SHIFT)){
 			map_page (cr2, m1, m2, gfns, levels);
+#ifdef RK_ANALYZER
+			rk_manipulate_mmarea_if_need(cr2, gfns[0]);
+#endif
+		}
 		mmio_unlock ();
 		current->vmctl.event_virtual ();
 		break;
