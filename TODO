@@ -1,0 +1,15 @@
+Major Feature:
+1. Add EIP Tracing: Display which kernel module is invoking malicious operation.
+
+2. Add Symbol Parsing: Convert the address[0X????????] to specific symbols such as NtOpenFile.
+[Note] When i parse PE Files in the VMM, it sometimes causes the machine to freeze. I don't know why, maybe due to the page fault in VMM Mode.
+
+3. Fix the protection area algorithm. Now it can work, but the area which is mapped(not the original one) would not be deleted after it is unmapped.
+
+Minor Feature:
+1. Own serial port receiver instead of GTKTerm. implement codes to supply the color display.
+
+Future Feature:
+1. DKOM Tracing.
+
+2. Automatic analyze. Need to modify the code about the boot progress.
