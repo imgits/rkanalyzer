@@ -1,7 +1,7 @@
-TARGETNAME=BVWinProbe
+TARGETNAME=rka_probe_win
 TARGETPATH=.\bin
 TARGETTYPE=DRIVER
 SOURCES=\
-    Main.cpp
+    probewin.cpp
 
 
