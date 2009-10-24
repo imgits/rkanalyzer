@@ -1,0 +1,7 @@
+TARGETNAME=BVWinProbe
+TARGETPATH=.\bin
+TARGETTYPE=DRIVER
+SOURCES=\
+    Main.cpp
+
+
