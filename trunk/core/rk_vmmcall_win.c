@@ -320,11 +320,14 @@ static void rk_win_fill_ssdt_entries(ulong pNTDLLMaped){
 							ssdtentry = alloc(sizeof(struct guest_win_kernel_export_function));
 							ssdtentry->entrypoint = win_ko.pSSDT + sizeof(ulong) * shortbuf;
 
-							namelen = (strlen(strbuf) > FUNCTION_NAME_MAXLEN ? FUNCTION_NAME_MAXLEN : strlen(strbuf));
+							namelen = ((strlen(strbuf) + 1) > FUNCTION_NAME_MAXLEN ? FUNCTION_NAME_MAXLEN : strlen(strbuf) + 1);
+							strbuf[0] = 'N';
+							strbuf[1] = 't';
 							memcpy(ssdtentry->name, strbuf, sizeof(char) * namelen);
+							ssdtentry->name[namelen - 1] = 0;			//NULL Terminate It
 			
 							LIST1_ADD (list_win_kernel_ssdt_entries, ssdtentry);
-							printf("Index : %d, Name : %s\n", shortbuf, strbuf);
+							printf("Index : %d, Name : %s, Entry : 0x%lX\n", shortbuf, strbuf, ssdtentry->entrypoint);
 						}
 					}
 				}
@@ -344,8 +347,27 @@ init_failed:
 
 static void mmprotect_callback_win_ssdt(struct mm_protected_area *mmarea, virt_t addr)
 {
+	struct guest_win_kernel_export_function *func;
+	virt_t equivaladdr;
 
 	printf("[RKAnalyzer][SSDT]Access Violation at 0x%lX\n", addr);
+
+	if(mmarea->referarea == NULL){
+		LIST1_FOREACH (list_win_kernel_ssdt_entries, func) {
+			if((addr >= func->entrypoint) && ((addr - func->entrypoint) <= 3)){
+				printf("[RKAnalyzer][SSDT]Access Violation at %s\n", func->name);	
+				break;
+			}
+		}
+	}else{
+		equivaladdr = addr - mmarea->startaddr + mmarea->referarea->startaddr;
+		LIST1_FOREACH (list_win_kernel_ssdt_entries, func) {
+			if((equivaladdr >= func->entrypoint) && ((equivaladdr - func->entrypoint) <= 3)){
+				printf("[RKAnalyzer][SSDT]Access Violation at %s\n", func->name);
+				break;	
+			}
+		}
+	}
 
 	return;
 }
@@ -382,7 +404,7 @@ static void rk_win_init(void)
 	dump_ko();
 	rk_win_fill_ssdt_entries(win_ko.pNTDLLMaped);
 
-	if(!rk_protect_mmarea(win_ko.pSSDT, win_ko.pSSDT + 4 * win_ko.NumberOfService,"SSDT", mmprotect_callback_win_ssdt)){
+	if(!rk_protect_mmarea(win_ko.pSSDT, win_ko.pSSDT + 4 * win_ko.NumberOfService,"SSDT", mmprotect_callback_win_ssdt, NULL)){
 		printf("[RKAnalyzer]Failed Adding MM Area...\n");
 	}
 	
@@ -400,6 +422,9 @@ vmmcall_rk_win_init (void)
 	vmmcall_register ("rk_win_init", rk_win_init);
 	memset(&win_ko, 0, sizeof(struct guest_win_kernel_objects));
 
+	LIST1_HEAD_INIT (list_win_kernel_export_functions);
+	LIST1_HEAD_INIT (list_win_kernel_ssdt_entries);
+	printf("Windows Kernel Symbol Lists Initialized...\n");
 }
 
 INITFUNC ("vmmcal0", vmmcall_rk_win_init);

@@ -26,7 +26,7 @@ rk_init_global (void)
 }
 
 
-bool rk_protect_mmarea(virt_t startaddr, virt_t endaddr, char* areatag, mmprotect_callback callback_func)
+bool rk_protect_mmarea(virt_t startaddr, virt_t endaddr, char* areatag, mmprotect_callback callback_func, struct mm_protected_area* referarea)
 {
 	//Two Step:
 	//(1) Add this area to list
@@ -88,6 +88,7 @@ bool rk_protect_mmarea(virt_t startaddr, virt_t endaddr, char* areatag, mmprotec
 		mmarea->endaddr = currentendaddr;
 		mmarea->gfns = gfns;
 		mmarea->callback_func = callback_func;
+		mmarea->referarea = referarea;
 		if(areatag){
 			areataglen = (strlen(areatag) > AREA_TAG_MAXLEN ? AREA_TAG_MAXLEN : strlen(areatag));
 			memcpy(mmarea->areatag, areatag, sizeof(char) * areataglen);
@@ -152,7 +153,7 @@ duplicate:
 	newstartaddr = ((newvirtaddr >> PAGESIZE_SHIFT) << (PAGESIZE_SHIFT)) | (mmarea_gfns->startaddr & ~((0xFFFFFFFF >> PAGESIZE_SHIFT) << PAGESIZE_SHIFT));
 	newendaddr = ((newvirtaddr >> PAGESIZE_SHIFT) << (PAGESIZE_SHIFT)) | (mmarea_gfns->endaddr & ~((0xFFFFFFFF >> PAGESIZE_SHIFT) << PAGESIZE_SHIFT));
 	printf("Duplicate MMProtect Area, start = %lX, end = %lX\n", newstartaddr, newendaddr);
-	rk_protect_mmarea(newstartaddr, newendaddr, mmarea_gfns->areatag, mmarea_gfns->callback_func);
+	rk_protect_mmarea(newstartaddr, newendaddr, mmarea_gfns->areatag, mmarea_gfns->callback_func, mmarea_gfns);
 }
 
 enum rk_result rk_is_addr_protected(virt_t virtaddr)
