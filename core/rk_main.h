@@ -35,6 +35,7 @@ struct mm_protected_area{
 	char		areatag[AREA_TAG_MAXLEN + 1];
 	mmprotect_callback callback_func;
 	bool 	page_wr_setbysystem;			//Is the wr bit set by us or the system
+	struct mm_protected_area *referarea;		//If this area is original, set this to NULL; else set it to the area copied from.
 };
 
 struct rk_tf_state{
@@ -46,7 +47,7 @@ struct rk_tf_state{
 };
 
 // The startaddr and endaddr could be in different page. The function will handle it and split them to different pages.
-bool rk_protect_mmarea(virt_t startaddr, virt_t endaddr, char* areatag, mmprotect_callback callback_func);
+bool rk_protect_mmarea(virt_t startaddr, virt_t endaddr, char* areatag, mmprotect_callback callback_func, struct mm_protected_area* referarea);
 void rk_manipulate_mmarea_if_need(virt_t newvirtaddr, u64 gfns);
 
 enum rk_result rk_is_addr_protected(virt_t virtaddr);
