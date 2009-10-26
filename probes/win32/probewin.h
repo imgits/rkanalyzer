@@ -155,6 +155,7 @@ struct guest_win_kernel_objects{
 	virt_t pIDT;
 	virt_t pKernelCodeStart;
 	virt_t pKernelCodeEnd;
+	virt_t pNTDLLMaped;
 };
 
 #endif

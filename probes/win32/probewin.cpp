@@ -43,7 +43,8 @@ extern "C"
 	__declspec(dllimport) SERVICE_DESCRIPTOR_TABLE KeServiceDescriptorTable;
 };
 
-extern "C" NTSTATUS
+// ntddk.h in XP DDK don't have this func declared. copied from 2003 DDK.
+extern "C" NTSYSAPI NTSTATUS
 NTAPI
 ZwCreateSection (
     OUT PHANDLE SectionHandle,
@@ -65,22 +66,16 @@ VOID DriverUnload( IN PDRIVER_OBJECT DriverObject )
     DbgPrint( "[rkanalyzer_probe_win32]Unloaded.\n");
 }
 
-VOID ParseNTDLLExportTable( )
+///
+/// Map the ntdll.dll to nonpagedpool for analyze. should be freed explictly after use
+///
+PVOID MapNTDLLToNonPagedPool()
 {
 	UNICODE_STRING dllName;
-	HANDLE hThread, hSection, hFile, hMod;
+	HANDLE hSection, hFile;
     SECTION_IMAGE_INFORMATION sii;
-    IMAGE_DOS_HEADER* dosheader;
-    IMAGE_OPTIONAL_HEADER* opthdr;
-    IMAGE_EXPORT_DIRECTORY* pExportTable;
-    DWORD* arrayOfFunctionAddresses;
-    DWORD* arrayOfFunctionNames;
-    WORD* arrayOfFunctionOrdinals;
-    DWORD functionOrdinal;
-    DWORD Base, x, functionAddress;
-    char* functionName;
-    STRING ntFunctionName;
     PVOID BaseAddress = NULL;
+    PVOID pNTDLLMaped = NULL;
     SIZE_T size=0;
 
 	RtlInitUnicodeString(&dllName, L"\\Device\\HarddiskVolume1\\Windows\\System32\\ntdll.dll");
@@ -88,7 +83,6 @@ VOID ParseNTDLLExportTable( )
 
     IO_STATUS_BLOCK iosb;
 
-    //_asm int 3;
     ZwOpenFile(&hFile, FILE_EXECUTE | SYNCHRONIZE, &oa, &iosb, FILE_SHARE_READ, FILE_SYNCHRONOUS_IO_NONALERT);
 
     oa.ObjectName = 0;
@@ -99,46 +93,16 @@ VOID ParseNTDLLExportTable( )
     
     ZwClose(hFile);
     
-    hMod = BaseAddress;
-    
-    dosheader = (IMAGE_DOS_HEADER *)hMod;
-    
-    opthdr =(IMAGE_OPTIONAL_HEADER *) ((BYTE*)hMod+dosheader->e_lfanew+24);
-
-    pExportTable =(IMAGE_EXPORT_DIRECTORY*)((BYTE*) hMod + opthdr->DataDirectory[ IMAGE_DIRECTORY_ENTRY_EXPORT]. VirtualAddress);
-
-    // now we can get the exported functions, but note we convert from RVA to address
-    arrayOfFunctionAddresses = (DWORD*)( (BYTE*)hMod + pExportTable->AddressOfFunctions);
-
-    arrayOfFunctionNames = (DWORD*)( (BYTE*)hMod + pExportTable->AddressOfNames);
-
-    arrayOfFunctionOrdinals = (WORD*)( (BYTE*)hMod + pExportTable->AddressOfNameOrdinals);
-
-    Base = pExportTable->Base;
-
-    for(x = 0; x < pExportTable->NumberOfFunctions; x++)
+    pNTDLLMaped = ExAllocatePool(NonPagedPool, size);
+    if(pNTDLLMaped != NULL)
     {
-        functionName = (char*)( (BYTE*)hMod + arrayOfFunctionNames[x]);
-
-        RtlInitString(&ntFunctionName, functionName);
-
-        functionOrdinal = arrayOfFunctionOrdinals[x] + Base - 1; // always need to add base, -1 as array counts from 0
-        // this is the funny bit.  you would expect the function pointer to simply be arrayOfFunctionAddresses[x]
-        // oh no thats too simple.  it is actually arrayOfFunctionAddresses[functionOrdinal]!!
-        functionAddress = (DWORD)( (BYTE*)hMod + arrayOfFunctionAddresses[functionOrdinal]);
-        
-        // DbgPrint("0x%lx, %s\n", functionAddress, functionName);
-        
-        // dump the SSDT index
-        if((*functionName == 'N') && (*(functionName + 1) == 't'))
-        {
-        	DbgPrint("[%d]%s\n", *((WORD*)(functionAddress+1)), functionName);
-        }
+    	RtlCopyMemory(pNTDLLMaped, BaseAddress, size);
     }
 
 	ZwUnmapViewOfSection(NtCurrentProcess(), BaseAddress);
     ZwClose(hSection);
 
+	return pNTDLLMaped;
 }
 
 ////////////////////
@@ -155,23 +119,31 @@ NTSTATUS DriverEntry( IN PDRIVER_OBJECT DriverObject, IN PUNICODE_STRING Registr
     DbgPrint( "[rkanalyzer_probe_win32]Start.\n" );
     
     char *pcallname = "rk_win_init";
-    struct guest_win_kernel_objects win_ko;
+    struct guest_win_kernel_objects *pwin_ko = NULL;
+    PVOID pNTDLLMaped = NULL;
     
-    win_ko.pSDT = (virt_t)&KeServiceDescriptorTable;
-    win_ko.pSSDT = (virt_t)KeServiceDescriptorTable.ServiceTableBase;
-    win_ko.NumberOfService = (unsigned long int)KeServiceDescriptorTable.NumberOfService;
-    win_ko.pIDT = 0;
-    win_ko.pKernelCodeStart = 0;
-    win_ko.pKernelCodeEnd = 0;
+    if((pwin_ko = (struct guest_win_kernel_objects *)ExAllocatePool(NonPagedPool, sizeof(struct guest_win_kernel_objects))) == NULL)
+    {
+    	DbgPrint( "[rkanalyzer_probe_win32]Insufficient Resources.Init Failed.\n" );
+    	return STATUS_INSUFFICIENT_RESOURCES;
+    }
     
-    DbgPrint("[rkanalyzer_probe_win32]pSDT = 0x%lX\n", win_ko.pSDT);
-    DbgPrint("[rkanalyzer_probe_win32]pSSDT = 0x%lX\n", win_ko.pSSDT);
-    DbgPrint("[rkanalyzer_probe_win32]NumberOfService = %d\n", win_ko.NumberOfService);
+    pwin_ko->pSDT = (virt_t)&KeServiceDescriptorTable;
+    pwin_ko->pSSDT = (virt_t)KeServiceDescriptorTable.ServiceTableBase;
+    pwin_ko->NumberOfService = (unsigned long int)KeServiceDescriptorTable.NumberOfService;
+    pwin_ko->pIDT = 0;
+    pwin_ko->pKernelCodeStart = 0;
+    pwin_ko->pKernelCodeEnd = 0;
     
-    PVOID pointer_win_ko = &win_ko;
+    pNTDLLMaped = MapNTDLLToNonPagedPool();
+    pwin_ko->pNTDLLMaped = (virt_t)pNTDLLMaped;
+    
+    DbgPrint("[rkanalyzer_probe_win32]pSDT = 0x%lX\n", pwin_ko->pSDT);
+    DbgPrint("[rkanalyzer_probe_win32]pSSDT = 0x%lX\n", pwin_ko->pSSDT);
+    DbgPrint("[rkanalyzer_probe_win32]NumberOfService = %d\n", pwin_ko->NumberOfService);
+    
  
- 	ParseNTDLLExportTable();
- /*   
+ 
     __asm
     {
     	push ebx
@@ -183,7 +155,7 @@ NTSTATUS DriverEntry( IN PDRIVER_OBJECT DriverObject, IN PUNICODE_STRING Registr
         _emit 0x01
         _emit 0xC1
         
-    	mov ebx, pointer_win_ko
+    	mov ebx, pwin_ko
     	
     	_emit 0x0F        // VMCALL
         _emit 0x01
@@ -193,8 +165,14 @@ NTSTATUS DriverEntry( IN PDRIVER_OBJECT DriverObject, IN PUNICODE_STRING Registr
        	pop ebx
     }
     
-*/
     
+    if(pNTDLLMaped != NULL)
+    {
+		ExFreePool(pNTDLLMaped);
+	}
+	
+	ExFreePool(pwin_ko);
+	
     DbgPrint( "[rkanalyzer_probe_win32]Done.\n" );
     
     return STATUS_SUCCESS;
