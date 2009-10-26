@@ -11,5 +11,6 @@ Minor Feature:
 
 Future Feature:
 1. DKOM Tracing.
+[Note] 2009.10.26 I got an idea about how to do it. As DKOM modify kernel objects, if we can trace every kernel object then DKOM would not be a problem. Lucky we can do this by monitor calls to ObCreateObject(which is exported by ntoskrnl so we can get the address of this function). Now the problem left is how to intercept the call, as it is a call not a write, it would not trigger the page fault. A straightforward approach is to HOOK this function, but it would be vulnerable as malcodes can detect the hook. I'll think of a better way to do this.
 
 2. Automatic analyze. Need to modify the code about the boot progress.
