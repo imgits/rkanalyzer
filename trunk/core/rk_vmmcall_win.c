@@ -28,6 +28,7 @@ struct guest_win_kernel_objects{
 	virt_t pIDT;
 	virt_t pKernelCodeStart;
 	virt_t pKernelCodeEnd;
+	virt_t pNTDLLMaped;
 };
 
 struct guest_win_kernel_export_function{
@@ -150,7 +151,7 @@ static void rk_win_readfromguest()
 		}
 
 		//Function Entry Point
-		addr = pebase + Export.AddressOfFunctions + shortbuf * sizeof(ulong);
+		addr = pebase + Export.AddressOfFunctions + (shortbuf + Export.Base - 1) * sizeof(ulong);
 		if(read_linearaddr_l(addr, &buf) != VMMERR_SUCCESS){
 			continue;
 		}
@@ -196,7 +197,9 @@ init_failed:
 	return;
 }
 
-static void rk_win_fill_ssdt_entries(){
+*/
+
+static void rk_win_fill_ssdt_entries(ulong pNTDLLMaped){
 	
 	//Try reading .edata section from ntdll.dll...dirty hack but no other method
 	//Parse the PE Section
@@ -204,11 +207,12 @@ static void rk_win_fill_ssdt_entries(){
 	int i,j;
 	int step = 0;
 	int err = 0;
-	ulong pebase = 0;
+	ulong pebase = pNTDLLMaped;
 	ulong buf = 0;
 	u16 shortbuf = 0;
 	ulong addr = 0;
 	ulong addr_2 = 0;
+	ulong ordinalbase = 0;
 	int namelen = 0;
 	IMAGE_EXPORT_DIRECTORY Export;
 	char strbuf[FUNCTION_NAME_MAXLEN];
@@ -217,86 +221,55 @@ static void rk_win_fill_ssdt_entries(){
 	bool succeed = false;
 	struct guest_win_kernel_export_function *ssdtentry;
 	
-	//Scan for ntdll base
-	pebase = 0x80000000;
-	while(pebase > 0){
-		step = 0;
-		succeed = true;
-		if(read_linearaddr_l(pebase, &buf) == VMMERR_SUCCESS){
-			if(buf == 0x00905A4D){
-				//Found 'MZ'
-				//Test if the ImageSize is bigger than 0x80000
-				addr = pebase + rk_struct_win_offset(IMAGE_DOS_HEADER, e_lfanew);
-				if((err = read_linearaddr_l(addr, &buf)) == VMMERR_SUCCESS){
-					//buf = pExportDirectory
-					addr = pebase + buf + rk_struct_win_offset(IMAGE_NT_HEADERS, 
-						OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress);
-					if((err = read_linearaddr_l(addr, &buf)) == VMMERR_SUCCESS){
-						buf += pebase;
+	printf("[RKAnalyzer]Get SSDT Table Indices From Export Table Of Ntdll.dll...\n");
+	printf("NTDLL Mapped Base = %lX\n", pebase);
 
-						for (i = 0; i < sizeof(IMAGE_EXPORT_DIRECTORY); i++) {
-							if ((err = read_linearaddr_b (buf + i, buf_2 + i))
-							    != VMMERR_SUCCESS){
-								printf("Failed at 2, reason : %d\n", err);
-								succeed = false;
-								break;
-							}
-						}
-
-						if(!succeed)
-							goto nextcircle;
-				
-						step++;
-
-						//name
-						buf = Export.Name + pebase;
-						for (i = 0; i < sizeof(strbuf); i++) {
-							if ((err = read_linearaddr_b (buf + i, strbuf + i))
-							    != VMMERR_SUCCESS){
-								printf("Failed at 3, reason : %d\n", err);
-								succeed = false;
-								break;
-							}
-							if(strbuf[i] == 0)
-								break;
-						}
-				
-						if(!succeed)
-							goto nextcircle;
-				
-						step++;
-				
-						printf("%s\n", strbuf);
-
-						//Check if name = "ntdll.dll"
-						if(strcmp(strbuf, "ntdll.dll") == 0){
-							break;
-						}
-					}
-					else{
-						printf("Failed at 1, reason : %d\n", err);
-					}
-				}
-				else{
-					printf("Failed at 0, reason : %d\n", err);
-				}
-			}
-		}
-
-nextcircle:
-		pebase = pebase >> PAGESIZE_SHIFT;
-		pebase --;
-		pebase = pebase << PAGESIZE_SHIFT;
-	}
-
-	if(pebase <= 0){
+	//buf = pNTHeader
+	addr = pebase + rk_struct_win_offset(IMAGE_DOS_HEADER, e_lfanew);
+	err = read_linearaddr_l(addr, &buf);
+	if (err != VMMERR_SUCCESS)
 		goto init_failed;
+	buf += pebase;
+	step ++;
+
+	printf("NtHeader = %lX\n", buf);
+		
+	//buf = pExportDirectory
+	addr = buf + rk_struct_win_offset(IMAGE_NT_HEADERS, 
+			OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress);
+	err = read_linearaddr_l(addr, &buf);
+	if (err != VMMERR_SUCCESS)
+		goto init_failed;
+	buf += pebase;	
+	step ++;
+
+	printf("pExportDirectory = %lX\n", buf);
+	
+	for (i = 0; i < sizeof(IMAGE_EXPORT_DIRECTORY); i++) {
+		if (read_linearaddr_b (buf + i, buf_2 + i)
+		    != VMMERR_SUCCESS)
+			goto init_failed;
 	}
+	step ++;
+
+	printf("Export.Name = %lX\n", Export.Name);
+
+	//name
+	buf = Export.Name + pebase;
+	for (i = 0; i < sizeof(strbuf); i++) {
+		if (read_linearaddr_b (buf + i, strbuf + i)
+		    != VMMERR_SUCCESS)
+			goto init_failed;
+		if(strbuf[i] == 0)
+			break;
+	}
+
 	step ++;
 
 	printf("FileName: %s\n", strbuf);
 	printf("Number of Functions: %ld\n", Export.NumberOfFunctions);
 	printf("Number of Names: %ld\n",Export.NumberOfNames);
+	printf("Base: %ld\n", Export.Base);
 
 	//Dump the functions
 	//FIXME:各种越界问题
@@ -311,7 +284,7 @@ nextcircle:
 		}
 
 		//Function Entry Point
-		addr = pebase + Export.AddressOfFunctions + shortbuf * sizeof(ulong);
+		addr = pebase + Export.AddressOfFunctions + (shortbuf + Export.Base - 1) * sizeof(ulong);
 		if(read_linearaddr_l(addr, &buf) != VMMERR_SUCCESS){
 			continue;
 		}
@@ -335,34 +308,25 @@ nextcircle:
 			}
 		}
 
-		printf("Name : %s, Entry : %lX\n", strbuf, buf);
+		// printf("Name : %s, Entry : %lX\n", strbuf, buf);
 
 		if(succeed){
-			if(strbuf[0] == 'N' && strbuf[1] == 't'){
+			if(strbuf[0] == 'Z' && strbuf[1] == 'w'){
 				if((err = read_linearaddr_b(buf, &cbuf)) == VMMERR_SUCCESS){
 					if(cbuf == 0xb8){
-						addr = buf;
-						if(read_linearaddr_l(addr, &buf) == VMMERR_SUCCESS){
-							//buf = SSDT entry index
+						addr = buf + 1;
+						if(read_linearaddr_w(addr, &shortbuf) == VMMERR_SUCCESS){
+							//shortbuf = SSDT entry index
 							ssdtentry = alloc(sizeof(struct guest_win_kernel_export_function));
-							ssdtentry->entrypoint = win_ko.pSSDT + sizeof(ulong) * buf;
+							ssdtentry->entrypoint = win_ko.pSSDT + sizeof(ulong) * shortbuf;
 
 							namelen = (strlen(strbuf) > FUNCTION_NAME_MAXLEN ? FUNCTION_NAME_MAXLEN : strlen(strbuf));
 							memcpy(ssdtentry->name, strbuf, sizeof(char) * namelen);
 			
 							LIST1_ADD (list_win_kernel_ssdt_entries, ssdtentry);
-							printf("Index : %d, Name : %s\n", buf, strbuf);
-						}
-						else{
-							printf("Failed 6, err = %d\n", err);
+							printf("Index : %d, Name : %s\n", shortbuf, strbuf);
 						}
 					}
-					else{
-						printf("Failed 5, cbuf = %x\n", cbuf);
-					}
-				}
-				else{
-					printf("Failed 4, err = %d\n", err);
 				}
 			}
 		}
@@ -377,8 +341,6 @@ init_failed:
 	printf("[RKAnalyzer]Get SSDT Table Failed!, step = %d, buf= %lX, addr= %lX, err = %d\n", step, buf, addr, err);
 	return;
 }
-
-*/
 
 static void mmprotect_callback_win_ssdt(struct mm_protected_area *mmarea, virt_t addr)
 {
@@ -397,6 +359,7 @@ static void dump_ko(void)
 	printf("[RKAnalyzer]pIDT = 0x%lX\n", win_ko.pIDT);
 	printf("[RKAnalyzer]pKernelCodeStart = 0x%lX\n", win_ko.pKernelCodeStart);
 	printf("[RKAnalyzer]pKernelCodeEnd = 0x%lX\n", win_ko.pKernelCodeEnd);
+	printf("[RKAnalyzer]pNTDLLMaped = 0x%lX\n", win_ko.pNTDLLMaped);
 }
 
 static void rk_win_init(void)
@@ -417,6 +380,7 @@ static void rk_win_init(void)
 	}
 
 	dump_ko();
+	rk_win_fill_ssdt_entries(win_ko.pNTDLLMaped);
 
 	if(!rk_protect_mmarea(win_ko.pSSDT, win_ko.pSSDT + 4 * win_ko.NumberOfService,"SSDT", mmprotect_callback_win_ssdt)){
 		printf("[RKAnalyzer]Failed Adding MM Area...\n");
