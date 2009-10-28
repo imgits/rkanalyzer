@@ -40,6 +40,8 @@ struct mm_protected_area{
 
 struct rk_tf_state{
 	bool tf;					//Should run with tf? This is a once-set switch
+	bool has_ret_from_tf;				//Set this flag after return from tf. Clear it before the next entry.
+	bool other_interrput_during_tf;			//Other Interrupt During TF;
 	bool debuglog;					//debuglog
 	enum rk_result rk_res;				
 	virt_t	addr;					//The violation address

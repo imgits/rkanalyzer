@@ -353,6 +353,12 @@ vt__vm_run (void)
 {
 	enum vt__status status;
 
+#ifdef RK_ANALYZER
+	if(current->rk_tf.has_ret_from_tf){
+		rk_ret_from_tf();
+	}
+#endif
+
 	status = call_vt__vmresume ();
 	if (status != VT__VMEXIT) {
 		if (status == VT__VMENTRY_FAILED)
@@ -383,17 +389,47 @@ vt__vm_run_with_tf (void)
 static void
 vt__vm_run_with_rk_tf (void)
 {
+	union {
+		struct intr_info s;
+		ulong v;
+	} vii;
 	ulong rflags;
+	ulong exit_reason;
+
 
 	vt_read_flags (&rflags);
 	rflags |= RFLAGS_TF_BIT;
 	vt_write_flags (rflags);
 
-	rk_entry_before_tf();
+	if(!current->rk_tf.other_interrput_during_tf){ 
+		rk_entry_before_tf();
+	}
 
+	printf("====[VMM Entry]====\n");
 	vt__vm_run ();
+	printf("====[VMM Exit]====\n");
 
-	rk_ret_from_tf();
+	// Make Sure we return from TF exception instead of other reason
+	asm_vmread (VMCS_EXIT_REASON, &exit_reason);
+
+	if((exit_reason & EXIT_REASON_MASK) == EXIT_REASON_EXCEPTION_OR_NMI){
+		asm_vmread (VMCS_VMEXIT_INTR_INFO, &vii.v);
+		if (vii.s.valid == INTR_INFO_VALID_VALID) {
+			if(vii.s.type == INTR_INFO_TYPE_HARD_EXCEPTION){
+				if (vii.s.vector == EXCEPTION_DB){
+					printf("====[Return From TF]====\n");
+					current->rk_tf.has_ret_from_tf = true;
+				}
+			}
+		}
+	}
+
+	if(!current->rk_tf.has_ret_from_tf){
+		current->rk_tf.other_interrput_during_tf = true;
+	}else{
+		current->rk_tf.other_interrput_during_tf = false;
+	}
+
 
 	vt_read_flags (&rflags);
 	rflags &= ~RFLAGS_TF_BIT;
@@ -927,7 +963,11 @@ vt_mainloop (void)
 			vt__event_delivery_check ();
 			vt__exit_reason ();
 			vt__event_delivery_update ();
-			current->rk_tf.tf = false;
+			// MAKE SURE WE REALLY RETURNED FROM TF(#DB)
+			if(current->rk_tf.has_ret_from_tf){	
+				printf("=====Sucks!!!!!!!=====\n");		
+				current->rk_tf.tf = false;
+			}
 		}else{
 			if (current->u.vt.vr.sw.enable) {
 				vt__nmi ();
