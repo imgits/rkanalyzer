@@ -1,0 +1,1 @@
+[2009.10.27] Fixed a nasty bug about EFLAGS.TF. Now the flag is set correctly. The logger will show exactly how many times the memory address is accessed now.

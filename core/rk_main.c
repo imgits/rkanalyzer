@@ -7,6 +7,7 @@
 #include "rk_main.h"
 #include "list.h"
 #include "mm.h"
+#include "cpu_mmu.h"
 #include "initfunc.h"
 #include "string.h"
 #include "asm.h"
@@ -271,11 +272,19 @@ void rk_entry_before_tf(void)
 	ulong cr0toshadow;	
 	u64 pte;
 	pmap_t m;
+	ulong val;
+	int err = 0;
 
 	current->vmctl.read_control_reg (CONTROL_REG_CR0, &cr0toshadow);
 	cr0toshadow &= (~CR0_WP_BIT);
 	asm_vmwrite (VMCS_CR0_READ_SHADOW, cr0toshadow);
 	asm_vmwrite (VMCS_GUEST_CR0, cr0toshadow);
+
+	if((err = read_linearaddr_l(current->rk_tf.addr, &val)) == VMMERR_SUCCESS){
+		printf("Value Before Modification Is : %lX\n", val);
+	}else{
+		printf("Value Before Modification Is Unknown. err : %d\n", err);
+	}
 
 	//make sure the page is read-only before entry!
 	pmap_open_vmm (&m, current->spt.cr3tbl_phys, current->spt.levels);
@@ -292,11 +301,29 @@ void rk_ret_from_tf(void)
 	ulong cr0;
 	u64 pte;
 	pmap_t m;
+	ulong ip;
+	ulong val;
+	int err = 0;
+
+	// IMPORTANT:SET has_ret_from_tf to false
+	current->rk_tf.has_ret_from_tf = false;
+
+	current->vmctl.read_ip(&ip);
 	
+	if((err = read_linearaddr_l(current->rk_tf.addr, &val)) == VMMERR_SUCCESS){
+		printf("Value After Modification Is : %lX\n", val);
+	}else{
+		printf("Value After Modification Is Unknown. err : %d\n", err);
+	}
+
 	printf("[RKAnalyzer]Restore CR0.WP...\n");
+	printf("Current EIP is 0x%lX\n", ip);
 
 	//restore CR0's WP
 	current->vmctl.read_control_reg (CONTROL_REG_CR0, &cr0);
+
+	printf("Current Guest CRO.WP = %d\n", !!(cr0 & CR0_WP_BIT));
+
 	cr0 |= CR0_WP_BIT;
 	asm_vmwrite (VMCS_CR0_READ_SHADOW, cr0);
 	asm_vmwrite (VMCS_GUEST_CR0, cr0);
