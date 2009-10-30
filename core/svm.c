@@ -55,6 +55,7 @@ static void svm_generate_external_int (uint num);
 static void svm_event_virtual (void);
 static void svm_tsc_offset_changed (void);
 static bool svm_extern_flush_tlb_entry (struct vcpu *p, phys_t s, phys_t e);
+static struct rk_tf_state * svm_get_struct_rk_tf (void);
 
 static void svm_iopass (u32 port, bool pass) { UNIMPLEMENTED (); }
 
@@ -97,7 +98,17 @@ static struct vmctl_func func = {
 	svm_invlpg,
 	svm_reset,
 	svm_extern_flush_tlb_entry,
+#ifdef RK_ANALYZER
+	svm_get_struct_rk_tf,
+#endif
 };
+
+#ifdef RK_ANALYZER
+static struct rk_tf_state * svm_get_struct_rk_tf (void)
+{
+	return NULL;
+}
+#endif
 
 static void
 svm_generate_pagefault (ulong err, ulong cr2)

@@ -42,10 +42,9 @@ struct rk_tf_state{
 	bool tf;					//Should run with tf? This is a once-set switch
 	bool has_ret_from_tf;				//Set this flag after return from tf. Clear it before the next entry.
 	bool other_interrput_during_tf;			//Other Interrupt During TF;
-	bool debuglog;					//debuglog
-	enum rk_result rk_res;				
 	virt_t	addr;					//The violation address
 	u64 originalpte;				//Original PTE.we write it back after TF
+	ulong init_pending_count;			//Is there a init 
 };
 
 // The startaddr and endaddr could be in different page. The function will handle it and split them to different pages.

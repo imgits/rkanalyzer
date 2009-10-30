@@ -72,6 +72,9 @@
 	((nextd) ? list1_insert ((nextd)->pnext, (data), &(data)->pnext, \
 				 &(data)->next, (nextd), &(nextd)->pnext) \
 		 : LIST1_ADD ((head), (data)))
+#define LIST1_FOREACH_DELETABLE(head, var, varn) \
+	for (var = (head).next; var && ((varn = var->next), 1); \
+	     var = varn)
 
 /* usage:
    struct foo {

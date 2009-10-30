@@ -75,6 +75,9 @@ struct vmctl_func {
 	void (*invlpg) (ulong addr);
 	void (*reset) (void);
 	bool (*extern_flush_tlb_entry) (struct vcpu *p, phys_t s, phys_t e);
+#ifdef RK_ANALYZER
+	struct rk_tf_state * (*get_struct_rk_tf) (void);
+#endif
 };
 
 #endif
