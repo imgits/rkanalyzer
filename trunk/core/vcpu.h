@@ -79,9 +79,6 @@ struct vcpu {
 	struct mmio_data mmio;
 	struct nmi_func nmi;
 	struct apic_func apic;
-#ifdef RK_ANALYZER
-	struct rk_tf_state rk_tf;
-#endif
 };
 
 void vcpu_list_foreach (bool (*func) (struct vcpu *p, void *q), void *q);

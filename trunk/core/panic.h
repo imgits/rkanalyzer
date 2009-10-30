@@ -35,4 +35,10 @@
 void auto_reboot (void);
 void do_panic_reboot (void);
 
+#ifdef RK_ANALYZER
+
+void rk_debug_dump(void);
+
+#endif
+
 #endif

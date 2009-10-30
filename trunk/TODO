@@ -6,6 +6,9 @@ Major Feature:
 [2009.10.26][Partially Solved] SSDT Indices Extracted From NTDLL.DLL. That was really tricky:) Now i can make sure that the freeze is caused by page fault in VMM Mode, so i mapped the ntdll.dll file to a section, and then copied it to an non-paged area allocated. Now it works.
 
 3. Fix the protection area algorithm. Now it can work, but the area which is mapped(not the original one) would not be deleted after it is unmapped.
+[2009.10.28][Partially Solved] A new kind of remap attack(mentioned in CHANGELOG) has been solved. But the area would still not be deleted after unmapped, as we need to check the pte to do this.
+
+4. Add Locks mechanism for data operations(such as mm_protect_area). Else there maybe potential error on MP systems.
 
 Minor Feature:
 1. Own serial port receiver instead of GTKTerm. implement codes to supply the color display.

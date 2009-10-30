@@ -33,6 +33,7 @@
 #include "desc.h"
 #include "linkage.h"
 #include "types.h"
+#include "rk_main.h"
 
 struct vt_vmentry_regs {
 	ulong rax, rcx, rdx, rbx, cr2, rbp, rsi, rdi;
@@ -43,6 +44,9 @@ struct vt_vmentry_regs {
 		int enable, num;
 		u16 es, cs, ss, ds, fs, gs;
 	} sw;
+#ifdef RK_ANALYZER
+	struct rk_tf_state rk_tf;
+#endif
 };
 
 struct svm_vmrun_regs {

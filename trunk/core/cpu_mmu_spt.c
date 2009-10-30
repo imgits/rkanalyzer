@@ -2343,12 +2343,12 @@ cpu_mmu_spt_pagefault (ulong err, ulong cr2)
 	struct map_page_data2 m2[5];
 	u64 efer, gfns[5], entries[5];
 #ifdef RK_ANALYZER
-	enum rk_result rk_res,rk_res2;
+	enum rk_result rk_res;
 	pmap_t m;
 	u64 pte;
 	ulong ip;
-	ulong cr0toshadow;
 	bool no_wr_fault_dispatch = false;
+	struct rk_tf_state *p_rk_tf = current->vmctl.get_struct_rk_tf();
 #endif
 
 	current->vmctl.read_control_reg (CONTROL_REG_CR0, &cr0);
@@ -2374,10 +2374,9 @@ cpu_mmu_spt_pagefault (ulong err, ulong cr2)
 			printf("pte = 0x%llx\n", pte);
 			pmap_close (&m);
 			//We should let the write go, so disable CR0.WP
-			current->rk_tf.tf = true;
+			p_rk_tf->tf = true;
+			p_rk_tf->addr = cr2;
 			no_wr_fault_dispatch = true;
-			current->rk_tf.debuglog = true;
-			current->rk_tf.addr = cr2;
 		}
 	}
 #endif
@@ -2398,10 +2397,9 @@ cpu_mmu_spt_pagefault (ulong err, ulong cr2)
 			if((rk_res == RK_UNPROTECTED_IN_PROTECTED_AREA) || (rk_res == RK_PROTECTED) || (rk_res == RK_PROTECTED_BYSYSTEM)){
 				printf("protected: errorcode:%lx, eip=0x%lx\n", err, ip);
 				//We should let the write go, so disable CR0.WP
-				current->rk_tf.tf = true;
+				p_rk_tf->tf = true;
+				p_rk_tf->addr = cr2;				
 				no_wr_fault_dispatch = true;
-				current->rk_tf.debuglog = true;
-				current->rk_tf.addr = cr2;
 			}
 		}
 

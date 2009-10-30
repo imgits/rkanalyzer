@@ -49,6 +49,7 @@ static void vt_exint_pass (bool enable);
 static void vt_exint_pending (bool pending);
 static void vt_tsc_offset_changed (void);
 static bool vt_extern_flush_tlb_entry (struct vcpu *p, phys_t s, phys_t e);
+static struct rk_tf_state * vt_get_struct_rk_tf (void);
 
 static struct vmctl_func func = {
 	vt_vminit,
@@ -89,7 +90,17 @@ static struct vmctl_func func = {
 	vt_invlpg,
 	vt_reset,
 	vt_extern_flush_tlb_entry,
+#ifdef RK_ANALYZER
+	vt_get_struct_rk_tf,
+#endif
 };
+
+#ifdef RK_ANALYZER
+static struct rk_tf_state * vt_get_struct_rk_tf (void)
+{
+	return &(current->u.vt.vr.rk_tf);
+}
+#endif
 
 void
 vmctl_vt_init (void)

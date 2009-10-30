@@ -419,6 +419,26 @@ disable_apic (void)
 	asm_wrmsr (MSR_IA32_APIC_BASE_MSR, tmp);
 }
 
+void rk_debug_dump(void){
+	if (currentcpu_available ()) {
+		printf ("Hypervisor registers of cpu %d -----------------\n",
+			get_cpu_id ());
+		dump_vmm_general_regs ();
+		dump_vmm_control_regs ();
+		dump_vmm_other_regs ();
+		printf ("------------------------------------------------\n");
+	}
+	if (currentcpu_available () && current) {
+		printf ("Guest state and registers of cpu %d ------------\n",
+			get_cpu_id ());
+		dump_vm_general_regs ();
+		dump_vm_control_regs ();
+		dump_vm_sregs ();
+		dump_vm_other_regs ();
+		printf ("------------------------------------------------\n");
+	}
+}
+
 static void __attribute__ ((noreturn))
 panic_nomsg (bool w)
 {
