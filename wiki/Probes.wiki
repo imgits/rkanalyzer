@@ -10,3 +10,4 @@ Currently the following probe is supplied:
   * Build it with DDK environment
   * Use tools(InstDrv or something alike) to load the probe module into the kernel, and you will see the following in the serial terminal:
   http://rkanalyzer.googlecode.com/svn/wiki/Screenshot-rka-probe-win32.png
+  * Now the probe has done its work. You can test with your rootkit now!
