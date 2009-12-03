@@ -11,3 +11,7 @@ Here I offer two testcases which can represent some popular techniques used in r
 Sample code is here: [http://code.google.com/p/rkanalyzer/source/browse/testcase/TestAccessSSDT/Main.cpp]
 
 Checkout the TestAccessSSDT Directory and build under DDK. Load the driver, and you will see the following in serial Terminal:
+http://rkanalyzer.googlecode.com/svn/wiki/Screenshot-SSDT.png
+
+Ignore other debug informations, just notice the area with red rectangle. The rookit's attempt to write the SSDT is intercepted and reported. RKAnalyzer can even show which entry of SSDT is being written, and the exact value the rootkit is going to assign.
+
