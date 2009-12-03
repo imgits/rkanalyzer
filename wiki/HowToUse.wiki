@@ -13,7 +13,7 @@
 
 ===Steps===
   # Connect the Guest Machine and Host Machine with serial cable
-  # Checkout the code from the repository
+  # Checkout the code from [http://rkanalyzer.googlecode.com/svn/trunk/ the repository]
   # Start a terminal, enter the root directory of the source code
   # You could use ./config.sh to do some configuration before make. But make sure the "TTY_SERIAL" and "RK_ANALYZER" label are checked.
   # type make and get a cup of coffee.
