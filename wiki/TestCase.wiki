@@ -4,8 +4,10 @@
 
 Here I offer two testcases which can represent some popular techniques used in rootkits today. RKAnalyzer can detect these actions and show them to analyzers as understandable representations.
 
-*Make sure you HAD Already set up the Probe before test with rootkits*
+*Make sure you HAD Already set up the [http://code.google.com/p/rkanalyzer/wiki/Probes Probe] before test with rootkits*
 
 ===Case 1: SSDT Hooking===
 
 Sample code is here: [http://code.google.com/p/rkanalyzer/source/browse/testcase/TestAccessSSDT/Main.cpp]
+
+Checkout the TestAccessSSDT Directory and build under DDK. Load the driver, and you will see the following in serial Terminal:
