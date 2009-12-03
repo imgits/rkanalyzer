@@ -9,4 +9,4 @@ Currently the following probe is supplied:
   * Checkout the probe code from svn: https://rkanalyzer.googlecode.com/svn/probes/win32
   * Build it with DDK environment
   * Use tools(InstDrv or something alike) to load the probe module into the kernel, and you will see the following in the serial terminal:
-  http://rkanalyzer.googlecode.com/svn/wiki/Screenshot-rka-prob-win32.png
+  http://rkanalyzer.googlecode.com/svn/wiki/Screenshot-rka-probe-win32.png
