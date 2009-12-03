@@ -20,3 +20,8 @@ Ignore other debug informations, just notice the area with red rectangle. The ro
 Sample code is here: [http://code.google.com/p/rkanalyzer/source/browse/testcase/SSDTMDL/Main.cpp]
 
 MDL attack is much more dangerous than directly SSDT hooking, as the rootkit use another VA instead of the SSDT pointer exported by windows kernel, so it's hard to detect. RKAnalyzer can detect it.
+
+Checkout the SSDTMDL Directory and build under DDK. Load the driver, and you will see the following in serial Terminal:
+http://rkanalyzer.googlecode.com/svn/wiki/Screenshot-MDL.png
+
+The information in the red rectangle shows the rootkit's attempt to map the SSDT's physical page to a new VA. The information in the blue rectangle shows that RKAnalyzer intercepted the write attempt even if the rootkit used MDL attacking method.
