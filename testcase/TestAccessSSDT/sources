@@ -1,0 +1,7 @@
+TARGETNAME=TestAccessSSDT
+TARGETPATH=.\bin
+TARGETTYPE=DRIVER
+SOURCES=\
+    Main.cpp
+
+
