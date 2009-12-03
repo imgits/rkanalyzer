@@ -1,0 +1,11 @@
+#summary Probes
+
+To obtain guest OS information which is crucial to rootkit analysis, a probe is needed. Probe is usually a kernel module or kernel driver.
+
+Currently the following probe is supplied:
+
+===Probe For Windows(2K, XP, 2003)====
+
+  * Checkout the probe code from svn: https://rkanalyzer.googlecode.com/svn/probes/win32
+  * Build it with DDK environment
+  * Use tools(InstDrv or something alike) to load the probe module into the kernel, and you will see the following in the serial terminal:
