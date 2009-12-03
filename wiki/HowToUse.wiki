@@ -31,4 +31,4 @@ kernel /boot/bitvisor.elf
   * Start serial port monitor(i.e. GTKTerm) on Host Machine
   * Boot the Guest Machine, first select "BitVisor" in the GRUB list, then bitvisor will boot GRUB again, so you could select the operating system you want this time. If All things got right, you would see the following in GTKTerm:
   http://rkanalyzer.googlecode.com/svn/wiki/Screenshot-GtkTerm.png
-  * Now you get into the guest OS. Build Probes corresponding to the guest OS and run the probe. Then you can test with rootkits!
+  * Now you get into the guest OS. Build [http://code.google.com/p/rkanalyzer/wiki/Probes Probes] corresponding to the guest OS and run the probe. Then you can test with rootkits!
