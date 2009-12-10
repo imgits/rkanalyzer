@@ -38,6 +38,7 @@ void do_panic_reboot (void);
 #ifdef RK_ANALYZER
 
 void rk_debug_dump(void);
+void guest_backtrace (void);
 
 #endif
 

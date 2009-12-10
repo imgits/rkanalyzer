@@ -357,10 +357,16 @@ call_vt__vmlaunch (void)
 static enum vt__status
 call_vt__vmresume (void)
 {
+	/*
 	if((current->u.vt.vr.rk_tf.tf) && (!(current->u.vt.vr.rk_tf.other_interrput_during_tf))){
 		printf("RAX %08lX RCX %08lX RDX %08lX RBX %08lX\n", current->u.vt.vr.rax, current->u.vt.vr.rcx, current->u.vt.vr.rdx, current->u.vt.vr.rbx);
 		printf("CR2 %08lX RBP %08lX RSI %08lX RDI %08lX\n", current->u.vt.vr.cr2, current->u.vt.vr.rbp, current->u.vt.vr.rsi, current->u.vt.vr.rdi);
 		printf("VMCS PHYSICAL ADDR %llX\n", currentcpu->vt.vmcs_region_phys);	
+	}
+	*/
+
+	if((current->u.vt.vr.rk_tf.tf) && (current->u.vt.vr.rk_tf.other_interrput_during_tf)){
+		guest_backtrace();
 	}
 
 	if (asm_vmresume_regs (&current->u.vt.vr))
@@ -468,9 +474,6 @@ vt__vm_run (void)
 			if (vii.s.valid == INTR_INFO_VALID_VALID) {
 				if(vii.s.type == INTR_INFO_TYPE_HARD_EXCEPTION){
 					if (vii.s.vector == EXCEPTION_DB){
-						printf("====[Return From TF On CPU %d]====\n", get_cpu_id());
-						printf("VMCS PHYSICAL ADDR %llX\n", currentcpu->vt.vmcs_region_phys);	
-						rk_debug_dump();
 					}
 				}
 			}
@@ -551,14 +554,12 @@ rk_tf_test(void)
 
 	if(asm_lock_cmpxchgl((u32 *)(&current_cpu_in_rk_tf), (u32 *)(&cpu_test), (u32)NULL)){
 		if(asm_lock_cmpxchgl((u32 *)(&current_cpu_in_rk_tf), (u32 *)(&cpu_current_test), (u32)current)){
-			printf("CPU %d sync before NULL loop\n", get_cpu_id());
 			sync_all_processors();
 			enter = true;
 		}
 	}
 
 	if(enter){
-		printf("CPU %d Enter NULL loop\n", get_cpu_id());
 		spinlock_lock(&rk_tf_lock);
 		for(;;){
 			cpu_test = NULL;
@@ -568,7 +569,6 @@ rk_tf_test(void)
 			spinlock_lock(&rk_tf_lock);
 		}
 		spinlock_unlock(&rk_tf_lock);
-		printf("CPU %d Exit NULL loop\n", get_cpu_id());
 		sync_all_processors();
 	}
 }
@@ -948,10 +948,8 @@ vt__exit_reason (void)
 				do_init_signal ();
 			}else{
 				current->u.vt.vr.rk_tf.init_pending_count --;
-				printf("CPU %d Release one burden INIT\n", get_cpu_id());
 			}
 		}else{
-			printf("CPU %d Received INIT for sync\n", get_cpu_id());
 		}
 #else
 		do_init_signal ();
@@ -1093,11 +1091,9 @@ try_acquire_lock:
 			if(!asm_lock_cmpxchgl((u32 *)(&current_cpu_in_rk_tf), (u32 *)(&cpu_test), (u32)NULL)){
 				asm_lock_ulong_swap((ulong *)(&current_cpu_in_rk_tf), (ulong)current);		//Set to current cpu
 				spinlock_unlock(&rk_tf_lock);
-				printf("CPU %d Entered rk_tf, call other cpu for sync\n", get_cpu_id());
 				rk_send_interrupt_to_others();
 				sync_all_processors();
 			}else{
-				printf("CPU %d Ready For Sync, but not because of INIT\n", get_cpu_id());
 				current->u.vt.vr.rk_tf.init_pending_count ++;
 				spinlock_unlock(&rk_tf_lock);
 				rk_tf_test ();
@@ -1112,11 +1108,9 @@ try_acquire_lock:
 				if(asm_lock_cmpxchgl((u32 *)(&current_cpu_in_rk_tf), (u32 *)(&cpu_current_test), (u32)current)){
 					asm_vmread (VMCS_EXIT_REASON, &exit_reason);
 					if (exit_reason & EXIT_REASON_VMENTRY_FAILURE_BIT){
-						printf("CPU %d Ready For Sync, but not because of INIT\n", get_cpu_id());
 						current->u.vt.vr.rk_tf.init_pending_count ++;
 					}else{
 						if((exit_reason & EXIT_REASON_MASK) != EXIT_REASON_INIT_SIGNAL) {
-							printf("CPU %d Ready For Sync, but not because of INIT\n", get_cpu_id());
 							current->u.vt.vr.rk_tf.init_pending_count ++;
 						}
 					}
@@ -1190,8 +1184,7 @@ try_acquire_lock:
 			vt__exit_reason ();
 			vt__event_delivery_update ();
 			// MAKE SURE WE REALLY RETURNED FROM TF(#DB)
-			if(current->u.vt.vr.rk_tf.has_ret_from_tf){	
-				printf("=====Sucks!!!!!!!=====\n");		
+			if(current->u.vt.vr.rk_tf.has_ret_from_tf){		
 				current->u.vt.vr.rk_tf.tf = false;
 			}
 		}else{
@@ -1214,8 +1207,7 @@ try_acquire_lock:
 			}
 			if (current->u.vt.vr.rk_tf.tf){
 				// MAKE SURE WE REALLY RETURNED FROM TF(#DB)
-				if(current->u.vt.vr.rk_tf.has_ret_from_tf){	
-					printf("=====Sucks!!!!!!!=====\n");		
+				if(current->u.vt.vr.rk_tf.has_ret_from_tf){		
 					current->u.vt.vr.rk_tf.tf = false;
 				}
 			}

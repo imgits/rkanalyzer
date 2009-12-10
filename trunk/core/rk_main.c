@@ -80,10 +80,6 @@ bool rk_protect_mmarea(virt_t startaddr, virt_t endaddr, char* areatag, mmprotec
 			currentendaddr = endaddr;
 		}
 
-		printf("Current Addr = 0x%lX\n", currentaddr);
-		printf("Current End Addr = 0x%lX\n", currentendaddr);
-		printf("Next Addr = 0x%lX\n", nextaddr);
-
 		//Set mmarea
 		mmarea->startaddr = currentaddr;
 		mmarea->endaddr = currentendaddr;
@@ -128,9 +124,10 @@ void rk_manipulate_mmarea_if_need(virt_t newvirtaddr, u64 gfns){
 	char newareatag[AREA_TAG_MAXLEN + 1];
 	u64 pte, pte_gfns;
 	pmap_t m;
+	bool found_unrevealed = false;
 
 	//Step1. Check gfns is in protect mmarea
-	mmarea_gfns = rk_get_mmarea_bygfns(gfns);
+	mmarea_gfns = rk_get_mmarea_original_bygfns(gfns);
 	mmarea_virtaddr = rk_get_mmarea_byvirtaddr_insamepage(newvirtaddr);
 
 	if(mmarea_gfns == NULL){
@@ -146,9 +143,6 @@ void rk_manipulate_mmarea_if_need(virt_t newvirtaddr, u64 gfns){
 				// TODO:Show the change of the data after the remap
 				// TODO:Handle Large Pages
 				
-				printf("[RKAnalyzer]Original Area Remapped! old gfns = %llX, new gfns = %llX, virtaddr = %lX\n",
-				 mmarea_virtaddr->gfns, gfns, newvirtaddr);
-				
 				// Step 1
 				LIST1_FOREACH_DELETABLE (list_mmarea, mmarea, mmarea_n){
 					if((mmarea != mmarea_virtaddr) && (mmarea->referarea == mmarea_virtaddr)){
@@ -156,8 +150,6 @@ void rk_manipulate_mmarea_if_need(virt_t newvirtaddr, u64 gfns){
 						free(mmarea);
 					}
 				}
-				
-				printf("[RKAnalyzer]Derived Area Deleted");
 
 				// Step 2
 				mmvirt_startaddr = mmarea_virtaddr->startaddr;
@@ -177,8 +169,6 @@ void rk_manipulate_mmarea_if_need(virt_t newvirtaddr, u64 gfns){
 				rk_protect_mmarea(mmvirt_startaddr, mmvirt_endaddr, newareatag, callback_func, NULL);
 				mmarea_virtaddr = rk_get_mmarea_byvirtaddr_insamepage(mmvirt_startaddr);
 
-				printf("[RKAnalyzer]Original Area Refreshed");
-
 				// Step 3
 				if(mmarea_virtaddr != NULL){
 					pmap_open_vmm (&m, current->spt.cr3tbl_phys, current->spt.levels);
@@ -189,13 +179,13 @@ void rk_manipulate_mmarea_if_need(virt_t newvirtaddr, u64 gfns){
 						if(pte & PTE_P_BIT){
 							pte_gfns = (pte & PTE_ADDR_MASK64) >> PAGESIZE_SHIFT;
 							if(pte_gfns == gfns){
-								printf("Found Unrevealed Area derived the new original one, gfns = %llX, virtaddr = %lX\n",
-	 								gfns, currentaddr);
 								newstartaddr = ((currentaddr >> PAGESIZE_SHIFT) << (PAGESIZE_SHIFT)) | 
 									(mmvirt_startaddr & ~((0xFFFFFFFF >> PAGESIZE_SHIFT) << PAGESIZE_SHIFT));
 								newendaddr = ((currentaddr >> PAGESIZE_SHIFT) << (PAGESIZE_SHIFT)) |
 	 								(mmvirt_endaddr & ~((0xFFFFFFFF >> PAGESIZE_SHIFT) << PAGESIZE_SHIFT));
-								if((newstartaddr != mmvirt_startaddr) && (newendaddr != mmvirt_endaddr)){
+								if(rk_get_mmarea_byvirtaddr_insamepage(newstartaddr) == NULL){
+									found_unrevealed = true;
+									printf("Found Unrevealed Area derived the new original one, gfns = %llX, virtaddr = %lX\n", gfns, currentaddr);
 									printf("Duplicate MMProtect Area, start = %lX, end = %lX\n", 
 									 newstartaddr, newendaddr);
 									rk_protect_mmarea(newstartaddr, newendaddr, mmarea_virtaddr->areatag,
@@ -211,6 +201,11 @@ void rk_manipulate_mmarea_if_need(virt_t newvirtaddr, u64 gfns){
 						currentaddr ++;
 					}
 					pmap_close(&m);
+					
+					//Only Report if there is unrevealed area mapped to the same gfns, else consider it as normal system page load.
+					if(found_unrevealed)
+						printf("[RKAnalyzer]Original Area Remapped! old gfns = %llX, new gfns = %llX, virtaddr = %lX\n",
+				 		mmarea_virtaddr->gfns, gfns, newvirtaddr);
 				}
 			}else{
 				// It's a derived area. We can safely remove it as it's no longer threaten.
@@ -221,16 +216,96 @@ void rk_manipulate_mmarea_if_need(virt_t newvirtaddr, u64 gfns){
 		return;
 	}
 
-	//Step2. Check virtaddr is not in protect mmarea
+	//Step2. mmarea_gfns != NULL. This means the gfns matchs a current original area;
+	//Check virtaddr is not in protect mmarea
 	if(mmarea_virtaddr != NULL){
+		//Area of same VA already exists
 		if(mmarea_virtaddr->gfns != gfns){
-			//different gfns. the memory area has been remapped since last record.
-			//so we should change the mapping.delete last one and add new one.
-			LIST1_DEL(list_mmarea, mmarea_virtaddr);
-			free(mmarea_virtaddr);
-			goto duplicate;
+			if(mmarea_virtaddr->referarea == NULL){
+				// It's a original area. This means that the original area has been REMAPPED To Another Original Area
+				// Well, we still consider this remapped area as Original because it maybe mapped back later.
+				// We Should do the following:
+				// 1.Remove ALL area derived from this area.
+				// 2.Remove this area, then add it to the list again to refresh it.
+				// 3.Full-Scan the page table, find any pages that gfns = this one. MARK them to be protected and derived from this one.
+				// TODO:Show the change of the data after the remap
+				// TODO:Handle Large Pages
+				
+				// Step 1
+				LIST1_FOREACH_DELETABLE (list_mmarea, mmarea, mmarea_n){
+					if((mmarea != mmarea_virtaddr) && (mmarea->referarea == mmarea_virtaddr)){
+						LIST1_DEL(list_mmarea, mmarea);
+						free(mmarea);
+					}
+				}
+
+				// Step 2
+				mmvirt_startaddr = mmarea_virtaddr->startaddr;
+				mmvirt_endaddr = mmarea_virtaddr->endaddr;
+				callback_func = mmarea_virtaddr->callback_func;
+				if(mmarea_virtaddr->areatag){
+					areataglen = (strlen(mmarea_virtaddr->areatag) > AREA_TAG_MAXLEN ? 
+							AREA_TAG_MAXLEN : strlen(mmarea_virtaddr->areatag));
+					memcpy(newareatag, mmarea_virtaddr->areatag, sizeof(char) * areataglen);
+					newareatag[areataglen] = 0;
+				}else{
+					memset(newareatag, 0, AREA_TAG_MAXLEN + 1);
+				}
+				LIST1_DEL(list_mmarea, mmarea_virtaddr);
+				free(mmarea_virtaddr);
+				mmarea_virtaddr = NULL;
+				rk_protect_mmarea(mmvirt_startaddr, mmvirt_endaddr, newareatag, callback_func, NULL);
+				mmarea_virtaddr = rk_get_mmarea_byvirtaddr_insamepage(mmvirt_startaddr);
+
+				// Step 3
+				if(mmarea_virtaddr != NULL){
+					pmap_open_vmm (&m, current->spt.cr3tbl_phys, current->spt.levels);
+					currentaddr = 0;
+					while(currentaddr < 0xFFFFFFFF){
+						pmap_seek (&m, currentaddr, 1);
+						pte = pmap_read(&m);
+						if(pte & PTE_P_BIT){
+							pte_gfns = (pte & PTE_ADDR_MASK64) >> PAGESIZE_SHIFT;
+							if(pte_gfns == gfns){
+								newstartaddr = ((currentaddr >> PAGESIZE_SHIFT) << (PAGESIZE_SHIFT)) | 
+									(mmvirt_startaddr & ~((0xFFFFFFFF >> PAGESIZE_SHIFT) << PAGESIZE_SHIFT));
+								newendaddr = ((currentaddr >> PAGESIZE_SHIFT) << (PAGESIZE_SHIFT)) |
+	 								(mmvirt_endaddr & ~((0xFFFFFFFF >> PAGESIZE_SHIFT) << PAGESIZE_SHIFT));
+								if(rk_get_mmarea_byvirtaddr_insamepage(newstartaddr) == NULL){
+									found_unrevealed = true;
+									printf("Found Unrevealed Area derived the new original one, gfns = %llX, virtaddr = %lX\n", gfns, currentaddr);
+									printf("Duplicate MMProtect Area, start = %lX, end = %lX\n", 
+									 newstartaddr, newendaddr);
+									rk_protect_mmarea(newstartaddr, newendaddr, mmarea_virtaddr->areatag,
+									 mmarea_virtaddr->callback_func, mmarea_virtaddr);
+								}
+							}
+						}
+
+						currentaddr = currentaddr | ~((0xFFFFFFFF >> PAGESIZE_SHIFT) << PAGESIZE_SHIFT);
+						if(currentaddr == 0xFFFFFFFF)
+							break;
+
+						currentaddr ++;
+					}
+					pmap_close(&m);
+
+					//Only Report if there is unrevealed area mapped to the same gfns, else consider it as normal system page load.
+					if(found_unrevealed)
+						printf("[RKAnalyzer]Original Area Remapped! old gfns = %llX, new gfns = %llX, virtaddr = %lX\n",
+				 		mmarea_virtaddr->gfns, gfns, newvirtaddr);
+				}
+			}
+			else{
+				//It's a derived area remapped to another original area
+				//so we should change the mapping.delete last one and add new one.
+				LIST1_DEL(list_mmarea, mmarea_virtaddr);
+				free(mmarea_virtaddr);
+				goto duplicate;
+			}
 		}
 		//same gfns. no need to add it again.
+		//This often happens when paged in and out.
 		return;
 	}
 
@@ -283,7 +358,9 @@ enum rk_result rk_is_addr_protected(virt_t virtaddr)
 enum rk_result rk_callfunc_if_addr_protected(virt_t virtaddr)
 {
 	struct mm_protected_area *mmarea;
-	
+
+	//TODO:Add Support for Large Pages(4M)	
+
 	LIST1_FOREACH (list_mmarea, mmarea) {
 		if((virtaddr >= mmarea->startaddr) && (virtaddr <= mmarea->endaddr)){
 			if(!mmarea->page_wr_setbysystem){
@@ -319,7 +396,9 @@ enum rk_result rk_callfunc_if_addr_protected(virt_t virtaddr)
 
 struct mm_protected_area* rk_get_mmarea_byvirtaddr_insamepage(virt_t virtaddr){
 	struct mm_protected_area *mmarea;
-	
+
+	//TODO:Add Support for Large Pages(4M)	
+
 	LIST1_FOREACH (list_mmarea, mmarea) {
 		if((virtaddr >= mmarea->startaddr) && (virtaddr <= mmarea->endaddr)){
 			return mmarea;
@@ -341,16 +420,28 @@ struct mm_protected_area* rk_get_mmarea_byvirtaddr_insamepage(virt_t virtaddr){
 	return NULL;
 }
 
-struct mm_protected_area* rk_get_mmarea_bygfns(u64 gfns){
+struct mm_protected_area* rk_get_mmarea_original_bygfns(u64 gfns){
+
+	//TODO:Add Support for Large Pages(4M)
 
 	struct mm_protected_area *mmarea;
+	u64 pte;
+	pmap_t m;
+
+	pmap_open_vmm (&m, current->spt.cr3tbl_phys, current->spt.levels);
 
 	LIST1_FOREACH (list_mmarea, mmarea) {
-		if(mmarea->gfns == gfns){
-			return mmarea;
+		if((mmarea->gfns == gfns) && (mmarea->referarea == NULL)){
+			pmap_seek (&m, mmarea->startaddr, 1);
+			pte = pmap_read(&m);
+			if(pte & PTE_P_BIT){
+				pmap_close(&m);
+				return mmarea;
+			}
 		}
 	}
 	
+	pmap_close(&m);	
 	return NULL;
 }
 
@@ -368,10 +459,12 @@ void rk_entry_before_tf(void)
 	asm_vmwrite (VMCS_CR0_READ_SHADOW, cr0toshadow);
 	asm_vmwrite (VMCS_GUEST_CR0, cr0toshadow);
 
-	if((err = read_linearaddr_l(p_rk_tf->addr, &val)) == VMMERR_SUCCESS){
-		printf("Value Before Modification Is : %lX\n", val);
-	}else{
-		printf("Value Before Modification Is Unknown. err : %d\n", err);
+	if(p_rk_tf->shouldreportvalue){
+		if((err = read_linearaddr_l(p_rk_tf->addr, &val)) == VMMERR_SUCCESS){
+			printf("Value Before Modification Is : %lX\n", val);
+		}else{
+			printf("Value Before Modification Is Unknown. err : %d\n", err);
+		}
 	}
 
 	//make sure the page is read-only before entry!
@@ -399,19 +492,18 @@ void rk_ret_from_tf(void)
 
 	current->vmctl.read_ip(&ip);
 	
-	if((err = read_linearaddr_l(p_rk_tf->addr, &val)) == VMMERR_SUCCESS){
-		printf("Value After Modification Is : %lX\n", val);
-	}else{
-		printf("Value After Modification Is Unknown. err : %d\n", err);
-	}
+	if(p_rk_tf->shouldreportvalue){
+		if((err = read_linearaddr_l(p_rk_tf->addr, &val)) == VMMERR_SUCCESS){
+			printf("Value After Modification Is : %lX\n", val);
+		}else{
+			printf("Value After Modification Is Unknown. err : %d\n", err);
+		}
 
-	printf("[RKAnalyzer]Restore CR0.WP...\n");
-	printf("Current EIP is 0x%lX\n", ip);
+		printf("Current EIP is 0x%lX\n", ip);
+	}
 
 	//restore CR0's WP
 	current->vmctl.read_control_reg (CONTROL_REG_CR0, &cr0);
-
-	printf("Current Guest CRO.WP = %d\n", !!(cr0 & CR0_WP_BIT));
 
 	cr0 |= CR0_WP_BIT;
 	asm_vmwrite (VMCS_CR0_READ_SHADOW, cr0);

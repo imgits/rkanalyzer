@@ -37,13 +37,52 @@ struct guest_win_kernel_export_function{
 	char name[FUNCTION_NAME_MAXLEN];
 };
 
+struct guest_win_pe_section{
+	LIST1_DEFINE (struct guest_win_pe_section);
+	virt_t va;
+	ulong size;
+	ulong characteristics;
+	char name[FUNCTION_NAME_MAXLEN];
+};
+
 struct guest_win_kernel_objects win_ko;
 
 static LIST1_DEFINE_HEAD (struct guest_win_kernel_export_function, list_win_kernel_export_functions);
 static LIST1_DEFINE_HEAD (struct guest_win_kernel_export_function, list_win_kernel_ssdt_entries);
+static LIST1_DEFINE_HEAD (struct guest_win_pe_section, list_win_pe_sections);
 
-// This functions are useless, just keep for reference on how to parse a PE file section in memory
 /*
+
+static bool rk_win_getentryaddrbyname(const char *name, virt_t *pEntrypoint)
+{
+	struct guest_win_kernel_export_function *func;
+
+	LIST1_FOREACH (list_win_kernel_export_functions, func) {
+		if(strcmp(func->name, name) == 0){
+			*pEntrypoint = func->entrypoint;
+			return true;
+		}
+	}
+
+	return false;
+}
+
+static void rk_win_setdebugregister()
+{
+	virt_t pObCreateObject;
+	ulong dr7;
+
+	if (rk_win_getentryaddrbyname("ObCreateObject", &pObCreateObject)) {
+		asm volatile ("mov %0, %%db0" : : "a"(pObCreateObject));
+		asm_rddr7(&dr7);
+		dr7 |= 0x2;	//DR7.G0 = 1
+		dr7 &= 0xFFFCFFFF;	//DR7.R/W0 = 00;
+		asm volatile ("mov %0, %%db7" : : "a"(dr7));
+	}
+}
+
+*/
+
 
 static void rk_win_readfromguest()
 {
@@ -54,6 +93,7 @@ static void rk_win_readfromguest()
 	int err = 0;
 	ulong pebase = 0;
 	ulong buf = 0;
+	ulong pNTHeader = 0;
 	u16 shortbuf = 0;
 	ulong addr = 0;
 	ulong addr_2 = 0;
@@ -63,7 +103,13 @@ static void rk_win_readfromguest()
 	unsigned char* buf_2 = (unsigned char*)&Export;
 	bool succeed = false;
 	struct guest_win_kernel_export_function *function;
-	
+	struct guest_win_pe_section *section;
+	ulong addr_section_header = 0;
+	u16 numberOfSections = 0;
+	IMAGE_SECTION_HEADER section_header;
+	unsigned char* p_section_header = (unsigned char*)&section_header;
+	u8 sectionName[IMAGE_SIZEOF_SHORT_NAME + 1];
+
 	//Scan for Ntoskrnl base
 	pebase = 0x80000000;
 	while(pebase < 0xa0000000){
@@ -101,6 +147,7 @@ static void rk_win_readfromguest()
 	if (err != VMMERR_SUCCESS)
 		goto init_failed;
 	buf += pebase;
+	pNTHeader = buf;
 	step ++;
 
 	printf("NtHeader = %lX\n", buf);
@@ -137,6 +184,49 @@ static void rk_win_readfromguest()
 	printf("FileName: %s\n", strbuf);
 	printf("Number of Functions: %ld\n", Export.NumberOfFunctions);
 	printf("Number of Names: %ld\n",Export.NumberOfNames);
+
+	//Sections
+	//numberofSections
+	addr = pNTHeader + rk_struct_win_offset(IMAGE_NT_HEADERS, 
+			FileHeader.NumberOfSections);
+	err = read_linearaddr_w(addr, &shortbuf);
+	if (err != VMMERR_SUCCESS)
+		goto init_failed;
+	numberOfSections = shortbuf;
+	step ++;
+	//addr_section_header = p_IMAGE_FIRST_SECTION;
+	addr = pNTHeader + rk_struct_win_offset(IMAGE_NT_HEADERS, 
+			FileHeader.SizeOfOptionalHeader);
+	err = read_linearaddr_w(addr, &shortbuf);
+	if (err != VMMERR_SUCCESS)
+		goto init_failed;
+	addr_section_header = pNTHeader + rk_struct_win_offset( IMAGE_NT_HEADERS, OptionalHeader ) + shortbuf;
+	for (j = 0; j < numberOfSections; j++) {
+		for (i = 0; i < sizeof(IMAGE_SECTION_HEADER); i++) {
+			if (read_linearaddr_b (addr_section_header + i, p_section_header + i)
+		    	!= VMMERR_SUCCESS)
+				goto init_failed;
+		}
+		addr_section_header += sizeof(IMAGE_SECTION_HEADER);
+		memcpy(sectionName, section_header.Name, sizeof(u8) * IMAGE_SIZEOF_SHORT_NAME);
+		sectionName[IMAGE_SIZEOF_SHORT_NAME] = 0;
+		printf("Section Name = %s, VA = 0x%lX, SIZE = %ld bytes, Flags = 0x%lX\n", sectionName, 
+			section_header.VirtualAddress, section_header.SizeOfRawData, section_header.Characteristics);
+
+		section = alloc(sizeof(struct guest_win_pe_section));
+		section->va = pebase + section_header.VirtualAddress;
+		section->size = section_header.SizeOfRawData;
+		namelen = (strlen(strbuf) > (FUNCTION_NAME_MAXLEN - IMAGE_SIZEOF_SHORT_NAME - 2) ?
+			  (FUNCTION_NAME_MAXLEN - IMAGE_SIZEOF_SHORT_NAME - 2) :strlen(strbuf));
+		memcpy(section->name, strbuf, sizeof(char) * namelen);
+		section->name[namelen] = ':';
+		memcpy((section->name + namelen + 1), sectionName, sizeof(char) * (IMAGE_SIZEOF_SHORT_NAME + 1));
+		section->name[namelen + IMAGE_SIZEOF_SHORT_NAME + 1] = 0;		//NULL Terminate It
+		section->characteristics = section_header.Characteristics;
+
+		LIST1_ADD (list_win_pe_sections, section);
+	}
+	step ++;
 
 	//Dump the functions
 	//FIXME:各种越界问题
@@ -181,9 +271,10 @@ static void rk_win_readfromguest()
 
 			namelen = (strlen(strbuf) > FUNCTION_NAME_MAXLEN ? FUNCTION_NAME_MAXLEN : strlen(strbuf));
 			memcpy(function->name, strbuf, sizeof(char) * namelen);
-			
-			LIST1_ADD (list_win_kernel_export_functions, function);
+			function->name[namelen - 1] = 0;			//NULL Terminate It
 
+			LIST1_ADD (list_win_kernel_export_functions, function);
+			//printf("Name : %s, Entry : 0x%lX\n", strbuf, function->entrypoint);
 		}
 	}
 
@@ -196,8 +287,6 @@ init_failed:
 	printf("[RKAnalyzer]Get Export Table Failed!, step = %d, buf= %lX, addr= %lX, err = %d\n", step, buf, addr, err);
 	return;
 }
-
-*/
 
 static void rk_win_fill_ssdt_entries(ulong pNTDLLMaped){
 	
@@ -327,7 +416,7 @@ static void rk_win_fill_ssdt_entries(ulong pNTDLLMaped){
 							ssdtentry->name[namelen - 1] = 0;			//NULL Terminate It
 			
 							LIST1_ADD (list_win_kernel_ssdt_entries, ssdtentry);
-							printf("Index : %d, Name : %s, Entry : 0x%lX\n", shortbuf, strbuf, ssdtentry->entrypoint);
+							//printf("Index : %d, Name : %s, Entry : 0x%lX\n", shortbuf, strbuf, ssdtentry->entrypoint);
 						}
 					}
 				}
@@ -372,6 +461,27 @@ static void mmprotect_callback_win_ssdt(struct mm_protected_area *mmarea, virt_t
 	return;
 }
 
+static void mmprotect_callback_win_pereadonly(struct mm_protected_area *mmarea, virt_t addr)
+{
+	printf("[RKAnalyzer][PEReadOnly]Access Violation at 0x%lX\n", addr);
+}
+
+static void rk_win_protectpereadonlysections()
+{
+	struct guest_win_pe_section *section;
+
+	LIST1_FOREACH (list_win_pe_sections, section) {
+		if((section->characteristics & 0x80000000) == 0) {
+			printf("[RKAnalyzer]Protecting Readonly Section %s, VA = 0x%lX, VA_END = 0x%lX, SIZE = 0x%lX bytes\n", section->name, 
+			section->va, section->va + section->size - 1, section->size);
+			
+			if(!rk_protect_mmarea(section->va, section->va + section->size, "PEReadOnly", mmprotect_callback_win_pereadonly, NULL)){
+				printf("[RKAnalyzer]Failed Adding MM Area...\n");
+			}
+		}
+	}
+}
+
 static void dump_ko(void)
 {
 	printf("[RKAnalyzer]Kernel Objects Dump:\n");
@@ -402,9 +512,11 @@ static void rk_win_init(void)
 	}
 
 	dump_ko();
+	rk_win_readfromguest();
 	rk_win_fill_ssdt_entries(win_ko.pNTDLLMaped);
+	rk_win_protectpereadonlysections();
 
-	if(!rk_protect_mmarea(win_ko.pSSDT, win_ko.pSSDT + 4 * win_ko.NumberOfService,"SSDT", mmprotect_callback_win_ssdt, NULL)){
+	if(!rk_protect_mmarea(win_ko.pSSDT, win_ko.pSSDT + 4 * win_ko.NumberOfService - 1,"SSDT", mmprotect_callback_win_ssdt, NULL)){
 		printf("[RKAnalyzer]Failed Adding MM Area...\n");
 	}
 	
@@ -424,6 +536,7 @@ vmmcall_rk_win_init (void)
 
 	LIST1_HEAD_INIT (list_win_kernel_export_functions);
 	LIST1_HEAD_INIT (list_win_kernel_ssdt_entries);
+	LIST1_HEAD_INIT (list_win_pe_sections);
 	printf("Windows Kernel Symbol Lists Initialized...\n");
 }
 

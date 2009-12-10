@@ -2367,11 +2367,15 @@ cpu_mmu_spt_pagefault (ulong err, ulong cr2)
 		current->vmctl.read_ip(&ip);	
 		rk_res = rk_callfunc_if_addr_protected(cr2);
 		if((rk_res == RK_UNPROTECTED_IN_PROTECTED_AREA) || (rk_res == RK_PROTECTED) || (rk_res == RK_PROTECTED_BYSYSTEM)){
-			printf("protected: errorcode:%lx, eip=0x%lx\n", err, ip);
+			if((rk_res == RK_PROTECTED) || (rk_res == RK_PROTECTED_BYSYSTEM)){
+				p_rk_tf->shouldreportvalue = true;
+			}
+			else{
+				p_rk_tf->shouldreportvalue = false;
+			}
 			pmap_open_vmm (&m, current->spt.cr3tbl_phys, current->spt.levels);	
 			pmap_seek (&m, cr2, 1);
 			pte = pmap_read(&m);
-			printf("pte = 0x%llx\n", pte);
 			pmap_close (&m);
 			//We should let the write go, so disable CR0.WP
 			p_rk_tf->tf = true;
@@ -2395,7 +2399,12 @@ cpu_mmu_spt_pagefault (ulong err, ulong cr2)
 			current->vmctl.read_ip(&ip);	
 			rk_res = rk_callfunc_if_addr_protected(cr2);
 			if((rk_res == RK_UNPROTECTED_IN_PROTECTED_AREA) || (rk_res == RK_PROTECTED) || (rk_res == RK_PROTECTED_BYSYSTEM)){
-				printf("protected: errorcode:%lx, eip=0x%lx\n", err, ip);
+				if((rk_res == RK_PROTECTED) || (rk_res == RK_PROTECTED_BYSYSTEM)){
+					p_rk_tf->shouldreportvalue = true;
+				}
+				else{
+					p_rk_tf->shouldreportvalue = false;
+				}
 				//We should let the write go, so disable CR0.WP
 				p_rk_tf->tf = true;
 				p_rk_tf->addr = cr2;				
