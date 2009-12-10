@@ -45,6 +45,7 @@ struct rk_tf_state{
 	virt_t	addr;					//The violation address
 	u64 originalpte;				//Original PTE.we write it back after TF
 	ulong init_pending_count;			//Is there a init 
+	bool shouldreportvalue;				//Should Report Value Before and After Modification?
 };
 
 // The startaddr and endaddr could be in different page. The function will handle it and split them to different pages.
@@ -54,7 +55,7 @@ void rk_manipulate_mmarea_if_need(virt_t newvirtaddr, u64 gfns);
 enum rk_result rk_is_addr_protected(virt_t virtaddr);
 enum rk_result rk_callfunc_if_addr_protected(virt_t virtaddr);
 struct mm_protected_area* rk_get_mmarea_byvirtaddr_insamepage(virt_t virtaddr);
-struct mm_protected_area* rk_get_mmarea_bygfns(u64 gfns);
+struct mm_protected_area* rk_get_mmarea_original_bygfns(u64 gfns);
 void rk_ret_from_tf(void);
 void rk_entry_before_tf(void);
 

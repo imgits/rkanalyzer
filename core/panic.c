@@ -47,6 +47,7 @@
 #include "string.h"
 #include "tty.h"
 #include "types.h"
+#include "cpu_mmu.h"
 
 #define BIOS_AREA_SIZE 4096
 
@@ -105,6 +106,47 @@ freeze (void)
 		waitcycles (0, 1*1024*1024*1024);
 	}
 }
+
+#ifdef RK_ANALYZER
+
+/* stack */
+/* +8 arg */
+/* +4 address */
+/*  0 ebp */
+/*    ... */
+void
+guest_backtrace (void)
+{
+#ifdef __x86_64__
+#else
+	ulong rbp, caller, newrbp;
+	ulong start_rbp, rip;
+	current->vmctl.read_general_reg( GENERAL_REG_RBP, &start_rbp);
+	current->vmctl.read_ip(&rip);
+
+	printf ("guest backtrace:0x%lX", rip);
+	for (rbp = start_rbp; ; rbp = newrbp) {
+		if (read_linearaddr_l (rbp, &newrbp) != VMMERR_SUCCESS){
+			printf("error");
+			break;
+		}
+		if (read_linearaddr_l (rbp + 4, &caller) != VMMERR_SUCCESS){
+			printf("error");
+			break;
+		}
+		printf ("<-0x%lX", caller);
+		if (newrbp == 0)
+			break;
+		if (rbp > newrbp) {
+			printf ("<-bad");
+			break;
+		}
+	}
+	printf (".\n");
+#endif
+}
+
+#endif
 
 /* stack */
 /* +8 arg */
