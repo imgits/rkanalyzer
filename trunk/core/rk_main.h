@@ -46,6 +46,7 @@ struct rk_tf_state{
 	u64 originalpte;				//Original PTE.we write it back after TF
 	ulong init_pending_count;			//Is there a init 
 	bool shouldreportvalue;				//Should Report Value Before and After Modification?
+	bool if_flag;					//Is IF Flag Set when enter Single Stepping
 };
 
 // The startaddr and endaddr could be in different page. The function will handle it and split them to different pages.
