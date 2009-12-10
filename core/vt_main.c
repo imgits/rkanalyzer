@@ -409,17 +409,12 @@ vt__vm_run (void)
 	} vii;
 	ulong rflags;
 	ulong exit_reason;
-	bool rk_tf_test_flag = false;
 #endif
 	enum vt__status status;
 
 #ifdef RK_ANALYZER
 	if(current->u.vt.vr.rk_tf.has_ret_from_tf){
 		rk_ret_from_tf();
-		spinlock_lock(&rk_tf_lock);
-		asm_lock_ulong_swap((ulong *)(&current_cpu_in_rk_tf), (ulong)NULL);
-		spinlock_unlock(&rk_tf_lock);
-		sync_all_processors();
 	}
 
 	if(current->u.vt.vr.rk_tf.tf){
@@ -436,8 +431,6 @@ vt__vm_run (void)
 	}
 
 #ifdef RK_ANALYZER
-	vcpu_list_foreach(test_rk_tf, &rk_tf_test_flag);
-	
 	if(current->u.vt.vr.rk_tf.tf){
 		//printf("====[VMM Exit ON CPU %d]====\n", get_cpu_id());
 
@@ -461,22 +454,15 @@ vt__vm_run (void)
 		}else{
 			current->u.vt.vr.rk_tf.other_interrput_during_tf = false;
 			vt_read_flags (&rflags);
+			//Restore IF Flag
+			if(current->u.vt.vr.rk_tf.if_flag){
+				rflags |= RFLAGS_IF_BIT;
+			}
+			else{
+				rflags &= ~RFLAGS_IF_BIT;
+			}
 			rflags &= ~RFLAGS_TF_BIT;
 			vt_write_flags (rflags);
-		}
-	}else if(rk_tf_test_flag){
-
-		// IF we are in tf, check if we return from #TF
-		asm_vmread (VMCS_EXIT_REASON, &exit_reason);
-
-		if((exit_reason & EXIT_REASON_MASK) == EXIT_REASON_EXCEPTION_OR_NMI){
-			asm_vmread (VMCS_VMEXIT_INTR_INFO, &vii.v);
-			if (vii.s.valid == INTR_INFO_VALID_VALID) {
-				if(vii.s.type == INTR_INFO_TYPE_HARD_EXCEPTION){
-					if (vii.s.vector == EXCEPTION_DB){
-					}
-				}
-			}
 		}
 	}
 #endif
@@ -508,6 +494,13 @@ vt__vm_run_with_rk_tf (void)
 
 	vt_read_flags (&rflags);
 	rflags |= RFLAGS_TF_BIT;
+	if(rflags & RFLAGS_IF_BIT){
+		current->u.vt.vr.rk_tf.if_flag = true;
+	}
+	else{
+		current->u.vt.vr.rk_tf.if_flag = false;
+	}
+	rflags &= (~RFLAGS_IF_BIT);	//Block The Timer Interrupt!
 	vt_write_flags (rflags);
 
 	rk_entry_before_tf();
@@ -515,93 +508,6 @@ vt__vm_run_with_rk_tf (void)
 	printf("====[VMM Entry RK_TF]====\n");
 	vt__vm_run ();
 	printf("====[VMM Exit RK_TF]====\n");
-
-	/*** Moved TO vt__vm_run
-	// Make Sure we return from TF exception instead of other reason
-	// If we return from other reason such as external interrupt, then we start execute continously
-	asm_vmread (VMCS_EXIT_REASON, &exit_reason);
-
-	if((exit_reason & EXIT_REASON_MASK) == EXIT_REASON_EXCEPTION_OR_NMI){
-		asm_vmread (VMCS_VMEXIT_INTR_INFO, &vii.v);
-		if (vii.s.valid == INTR_INFO_VALID_VALID) {
-			if(vii.s.type == INTR_INFO_TYPE_HARD_EXCEPTION){
-				if (vii.s.vector == EXCEPTION_DB){
-					printf("====[Return From TF]====\n");
-					current->u.vt.vr.rk_tf.has_ret_from_tf = true;
-				}
-			}
-		}
-	}
-
-	if(!current->u.vt.vr.rk_tf.has_ret_from_tf){
-		current->u.vt.vr.rk_tf.other_interrput_during_tf = true;		//Set this flag to execute continously
-	}else{
-		current->u.vt.vr.rk_tf.other_interrput_during_tf = false;
-
-		vt_read_flags (&rflags);
-		rflags &= ~RFLAGS_TF_BIT;
-		vt_write_flags (rflags);
-	}spinlock_lock(&rk_tf_lock);
-	***/
-}
-
-static void 
-rk_tf_test(void)
-{
-	bool enter = false;
-	struct vcpu *cpu_test = NULL;
-	struct vcpu *cpu_current_test = current;
-
-	if(asm_lock_cmpxchgl((u32 *)(&current_cpu_in_rk_tf), (u32 *)(&cpu_test), (u32)NULL)){
-		if(asm_lock_cmpxchgl((u32 *)(&current_cpu_in_rk_tf), (u32 *)(&cpu_current_test), (u32)current)){
-			sync_all_processors();
-			enter = true;
-		}
-	}
-
-	if(enter){
-		spinlock_lock(&rk_tf_lock);
-		for(;;){
-			cpu_test = NULL;
-			if(!asm_lock_cmpxchgl((u32 *)(&current_cpu_in_rk_tf), (u32 *)(&cpu_test), (u32)NULL))
-				break;
-			spinlock_unlock(&rk_tf_lock);
-			spinlock_lock(&rk_tf_lock);
-		}
-		spinlock_unlock(&rk_tf_lock);
-		sync_all_processors();
-	}
-}
-
-static void
-rk_apic_wait_for_idle (volatile u32 *apic_icr)
-{
-	while ((*apic_icr & ICR_STATUS_BIT) != ICR_STATUS_IDLE);
-}
-
-static void
-rk_apic_assert_init (volatile u32 *apic_icr)
-{
-	rk_apic_wait_for_idle (apic_icr);
-	*apic_icr = ICR_DEST_OTHER | ICR_TRIGGER_LEVEL | ICR_MODE_INIT |
-		ICR_LEVEL_ASSERT;
-}
-
-static void
-rk_send_interrupt_to_others(void)
-{
-	const u32 apic_icr_phys = 0xFEE00300;
-	volatile u32 *apic_icr;
-
-	if (!apic_available ())
-		return;
-
-	apic_icr = mapmem (MAPMEM_HPHYS | MAPMEM_WRITE | MAPMEM_PWT |
-			   MAPMEM_PCD, apic_icr_phys, sizeof *apic_icr);
-	if (!apic_icr)
-		return;
-	rk_apic_assert_init (apic_icr);
-	unmapmem ((void *)apic_icr, sizeof *apic_icr);
 }
 
 #endif
@@ -901,7 +807,6 @@ static void
 vt__exit_reason (void)
 {
 	ulong exit_reason;
-	struct vcpu *cpu_test = NULL;
 
 	current->u.vt.event = VT_EVENT_TYPE_PHYSICAL;
 	asm_vmread (VMCS_EXIT_REASON, &exit_reason);
@@ -941,19 +846,7 @@ vt__exit_reason (void)
 		do_vmcall ();
 		break;
 	case EXIT_REASON_INIT_SIGNAL:
-#ifdef RK_ANALYZER
-		cpu_test = NULL;
-		if(!asm_lock_cmpxchgl((u32 *)(&current_cpu_in_rk_tf), (u32 *)(&cpu_test), (u32)NULL)){
-			if(current->u.vt.vr.rk_tf.init_pending_count == 0){
-				do_init_signal ();
-			}else{
-				current->u.vt.vr.rk_tf.init_pending_count --;
-			}
-		}else{
-		}
-#else
 		do_init_signal ();
-#endif
 		break;
 	case EXIT_REASON_STARTUP_IPI:
 		do_startup_ipi ();
@@ -1075,50 +968,12 @@ vt_mainloop (void)
 	enum vmmerr err;
 	ulong cr0, acr;
 	u64 efer;
-	struct vcpu *cpu_test = NULL;
-	struct vcpu *cpu_current_test = current;
-	ulong exit_reason;
 
 	for (;;) {
 		schedule ();
 		vt_vmptrld (current->u.vt.vi.vmcs_region_phys);
 		panic_test ();
-#ifdef RK_ANALYZER
-		if (current->u.vt.vr.rk_tf.tf && (!(current->u.vt.vr.rk_tf.other_interrput_during_tf))){
-try_acquire_lock:
-			spinlock_lock(&rk_tf_lock);
-			cpu_test = NULL;
-			if(!asm_lock_cmpxchgl((u32 *)(&current_cpu_in_rk_tf), (u32 *)(&cpu_test), (u32)NULL)){
-				asm_lock_ulong_swap((ulong *)(&current_cpu_in_rk_tf), (ulong)current);		//Set to current cpu
-				spinlock_unlock(&rk_tf_lock);
-				rk_send_interrupt_to_others();
-				sync_all_processors();
-			}else{
-				current->u.vt.vr.rk_tf.init_pending_count ++;
-				spinlock_unlock(&rk_tf_lock);
-				rk_tf_test ();
-				
-				//try acquire lock again
-				goto try_acquire_lock;		
-			}
-		}else{
-			cpu_test = NULL;
-			if(asm_lock_cmpxchgl((u32 *)(&current_cpu_in_rk_tf), (u32 *)(&cpu_test), (u32)NULL)){
-				cpu_current_test = current;
-				if(asm_lock_cmpxchgl((u32 *)(&current_cpu_in_rk_tf), (u32 *)(&cpu_current_test), (u32)current)){
-					asm_vmread (VMCS_EXIT_REASON, &exit_reason);
-					if (exit_reason & EXIT_REASON_VMENTRY_FAILURE_BIT){
-						current->u.vt.vr.rk_tf.init_pending_count ++;
-					}else{
-						if((exit_reason & EXIT_REASON_MASK) != EXIT_REASON_INIT_SIGNAL) {
-							current->u.vt.vr.rk_tf.init_pending_count ++;
-						}
-					}
-				}
-			}
-			rk_tf_test ();
-		}
-#endif
+
 		if (current->halt) {
 			vt__halt ();
 			current->halt = false;
