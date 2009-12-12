@@ -2275,7 +2275,28 @@ cpu_mmu_spt_updatecr3 (void)
 void
 cpu_mmu_spt_invalidate (ulong virtual_addr)
 {
+#ifdef RK_ANALYZER
+	u64 pte, pte_gfns;
+	pmap_t m;
+#endif
+
 	invalidate_page (virtual_addr);
+
+#ifdef RK_ANALYZER
+	//Make sure protected memory areas are still protected.
+	//We only check kernel address currently.
+	if(virtual_addr >= 0x80000000) {
+		pmap_open_vmm (&m, current->spt.cr3tbl_phys, current->spt.levels);
+		pmap_seek (&m, virtual_addr, 1);
+		pte = pmap_read(&m);
+		//Make sure the page is present. if not, we don't bother maintain the corresponding protected area.
+		if(pte & PTE_P_BIT){
+			pte_gfns = (pte & PTE_ADDR_MASK64) >> PAGESIZE_SHIFT;
+			rk_manipulate_mmarea_if_need(virtual_addr, pte_gfns);
+		}
+		pmap_close(&m);
+	}
+#endif
 }
 
 static void

@@ -17,17 +17,18 @@
 
 #ifdef RK_ANALYZER
 
+static spinlock_t mmarea_lock;
 static LIST1_DEFINE_HEAD (struct mm_protected_area, list_mmarea);
 
 static void
 rk_init_global (void)
 {
+	spinlock_init(&mmarea_lock);
 	LIST1_HEAD_INIT (list_mmarea);
 	printf("MM Protect Area List Initialized...\n");
 }
 
-
-bool rk_protect_mmarea(virt_t startaddr, virt_t endaddr, char* areatag, mmprotect_callback callback_func, struct mm_protected_area* referarea)
+static bool rk_protect_mmarea_core(virt_t startaddr, virt_t endaddr, char* areatag, mmprotect_callback callback_func, struct mm_protected_area* referarea)
 {
 	//Two Step:
 	//(1) Add this area to list
@@ -35,7 +36,7 @@ bool rk_protect_mmarea(virt_t startaddr, virt_t endaddr, char* areatag, mmprotec
 
 	struct mm_protected_area *mmarea;
 	int areataglen;
-	u64 pte, gfns;
+	u64 pte, gfns = 0;
 	virt_t currentaddr, currentendaddr, nextaddr;
 	pmap_t m;
 
@@ -61,19 +62,30 @@ bool rk_protect_mmarea(virt_t startaddr, virt_t endaddr, char* areatag, mmprotec
 		//Modify Page Table
 		pmap_seek (&m, currentaddr, 1);
 		pte = pmap_read(&m);
-		if((pte & PTE_RW_BIT) != 0){
-			mmarea->page_wr_setbysystem = false;
-		}else{
+		if(pte & PTE_P_BIT) {
+			if((pte & PTE_RW_BIT) != 0){
+				mmarea->page_wr_setbysystem = false;
+			}else{
+				if(rk_is_addr_protected(startaddr) == RK_UNPROTECTED_IN_PROTECTED_AREA){
+					mmarea->page_wr_setbysystem = false;
+				}else{
+					mmarea->page_wr_setbysystem = true;
+				}
+			}
+			pte = pte & (~PTE_RW_BIT);
+			pmap_write (&m, pte, 0xFFF);
+
+			gfns = (pte & PTE_ADDR_MASK64) >> PAGESIZE_SHIFT;
+		}
+		else {
+			//The page is not present now.
 			if(rk_is_addr_protected(startaddr) == RK_UNPROTECTED_IN_PROTECTED_AREA){
 				mmarea->page_wr_setbysystem = false;
 			}else{
 				mmarea->page_wr_setbysystem = true;
 			}
 		}
-		pte = pte & (~PTE_RW_BIT);
-		pmap_write (&m, pte, 0xFFF);
 
-		gfns = (pte & PTE_ADDR_MASK64) >> PAGESIZE_SHIFT;
 		currentendaddr = currentaddr | ~((0xFFFFFFFF >> PAGESIZE_SHIFT) << PAGESIZE_SHIFT);
 		nextaddr = currentendaddr + 1;
 		if(currentendaddr > endaddr){
@@ -103,9 +115,20 @@ bool rk_protect_mmarea(virt_t startaddr, virt_t endaddr, char* areatag, mmprotec
 	}
 	
 	pmap_close (&m);
-
+	
 	return true;
 	
+}
+
+bool rk_protect_mmarea(virt_t startaddr, virt_t endaddr, char* areatag, mmprotect_callback callback_func, struct mm_protected_area* referarea)
+{
+	bool ret = false;
+
+	spinlock_lock(&mmarea_lock);
+	ret =  rk_protect_mmarea_core(startaddr, endaddr, areatag, callback_func, referarea);
+	spinlock_unlock(&mmarea_lock);
+
+	return ret;
 }
 
 void rk_manipulate_mmarea_if_need(virt_t newvirtaddr, u64 gfns){
@@ -125,6 +148,8 @@ void rk_manipulate_mmarea_if_need(virt_t newvirtaddr, u64 gfns){
 	u64 pte, pte_gfns;
 	pmap_t m;
 	bool found_unrevealed = false;
+
+	spinlock_lock(&mmarea_lock);
 
 	//Step1. Check gfns is in protect mmarea
 	mmarea_gfns = rk_get_mmarea_original_bygfns(gfns);
@@ -166,7 +191,7 @@ void rk_manipulate_mmarea_if_need(virt_t newvirtaddr, u64 gfns){
 				LIST1_DEL(list_mmarea, mmarea_virtaddr);
 				free(mmarea_virtaddr);
 				mmarea_virtaddr = NULL;
-				rk_protect_mmarea(mmvirt_startaddr, mmvirt_endaddr, newareatag, callback_func, NULL);
+				rk_protect_mmarea_core(mmvirt_startaddr, mmvirt_endaddr, newareatag, callback_func, NULL);
 				mmarea_virtaddr = rk_get_mmarea_byvirtaddr_insamepage(mmvirt_startaddr);
 
 				// Step 3
@@ -188,7 +213,7 @@ void rk_manipulate_mmarea_if_need(virt_t newvirtaddr, u64 gfns){
 									printf("Found Unrevealed Area derived the new original one, gfns = %llX, virtaddr = %lX\n", gfns, currentaddr);
 									printf("Duplicate MMProtect Area, start = %lX, end = %lX\n", 
 									 newstartaddr, newendaddr);
-									rk_protect_mmarea(newstartaddr, newendaddr, mmarea_virtaddr->areatag,
+									rk_protect_mmarea_core(newstartaddr, newendaddr, mmarea_virtaddr->areatag,
 									 mmarea_virtaddr->callback_func, mmarea_virtaddr);
 								}
 							}
@@ -213,6 +238,7 @@ void rk_manipulate_mmarea_if_need(virt_t newvirtaddr, u64 gfns){
 				free(mmarea_virtaddr);
 			}
 		}
+		spinlock_unlock(&mmarea_lock);
 		return;
 	}
 
@@ -253,8 +279,9 @@ void rk_manipulate_mmarea_if_need(virt_t newvirtaddr, u64 gfns){
 				}
 				LIST1_DEL(list_mmarea, mmarea_virtaddr);
 				free(mmarea_virtaddr);
+
 				mmarea_virtaddr = NULL;
-				rk_protect_mmarea(mmvirt_startaddr, mmvirt_endaddr, newareatag, callback_func, NULL);
+				rk_protect_mmarea_core(mmvirt_startaddr, mmvirt_endaddr, newareatag, callback_func, NULL);
 				mmarea_virtaddr = rk_get_mmarea_byvirtaddr_insamepage(mmvirt_startaddr);
 
 				// Step 3
@@ -276,7 +303,7 @@ void rk_manipulate_mmarea_if_need(virt_t newvirtaddr, u64 gfns){
 									printf("Found Unrevealed Area derived the new original one, gfns = %llX, virtaddr = %lX\n", gfns, currentaddr);
 									printf("Duplicate MMProtect Area, start = %lX, end = %lX\n", 
 									 newstartaddr, newendaddr);
-									rk_protect_mmarea(newstartaddr, newendaddr, mmarea_virtaddr->areatag,
+									rk_protect_mmarea_core(newstartaddr, newendaddr, mmarea_virtaddr->areatag,
 									 mmarea_virtaddr->callback_func, mmarea_virtaddr);
 								}
 							}
@@ -304,8 +331,32 @@ void rk_manipulate_mmarea_if_need(virt_t newvirtaddr, u64 gfns){
 				goto duplicate;
 			}
 		}
-		//same gfns. no need to add it again.
-		//This often happens when paged in and out.
+		else{
+			//same gfns. no need to add it again.
+			//This often happens when paged in and out.
+			//But we should set the R/W bit of PTE to readonly, because when calling this function, it means that the pte is modified.
+			pmap_open_vmm (&m, current->spt.cr3tbl_phys, current->spt.levels);
+			pmap_seek (&m, mmarea_virtaddr->startaddr, 1);
+			pte = pmap_read(&m);
+			if(pte & PTE_P_BIT) {
+				if((pte & PTE_RW_BIT) != 0){
+					LIST1_FOREACH (list_mmarea, mmarea) {
+						if(mmarea->gfns == gfns) {
+							mmarea->page_wr_setbysystem = false;
+						}
+					}
+				}
+				pte = pte & (~PTE_RW_BIT);
+				pmap_write (&m, pte, 0xFFF);
+			}
+			else {
+				//The page is not present now.
+				//Should Never Happen
+				printf("[RkAnalyzer]Strange Status. addr = 0x%lX\n", mmarea_virtaddr->startaddr);
+			}
+			pmap_close(&m);
+		}
+		spinlock_unlock(&mmarea_lock);
 		return;
 	}
 
@@ -316,7 +367,8 @@ duplicate:
 	newstartaddr = ((newvirtaddr >> PAGESIZE_SHIFT) << (PAGESIZE_SHIFT)) | (mmarea_gfns->startaddr & ~((0xFFFFFFFF >> PAGESIZE_SHIFT) << PAGESIZE_SHIFT));
 	newendaddr = ((newvirtaddr >> PAGESIZE_SHIFT) << (PAGESIZE_SHIFT)) | (mmarea_gfns->endaddr & ~((0xFFFFFFFF >> PAGESIZE_SHIFT) << PAGESIZE_SHIFT));
 	printf("Duplicate MMProtect Area, start = %lX, end = %lX\n", newstartaddr, newendaddr);
-	rk_protect_mmarea(newstartaddr, newendaddr, mmarea_gfns->areatag, mmarea_gfns->callback_func, mmarea_gfns);
+	rk_protect_mmarea_core(newstartaddr, newendaddr, mmarea_gfns->areatag, mmarea_gfns->callback_func, mmarea_gfns);
+	spinlock_unlock(&mmarea_lock);
 }
 
 enum rk_result rk_is_addr_protected(virt_t virtaddr)
@@ -448,8 +500,6 @@ struct mm_protected_area* rk_get_mmarea_original_bygfns(u64 gfns){
 void rk_entry_before_tf(void)
 {
 	ulong cr0toshadow;	
-	u64 pte;
-	pmap_t m;
 	ulong val;
 	int err = 0;
 	struct rk_tf_state *p_rk_tf = current->vmctl.get_struct_rk_tf();
@@ -466,22 +516,11 @@ void rk_entry_before_tf(void)
 			printf("Value Before Modification Is Unknown. err : %d\n", err);
 		}
 	}
-
-	//make sure the page is read-only before entry!
-	pmap_open_vmm (&m, current->spt.cr3tbl_phys, current->spt.levels);
-	pmap_seek (&m, p_rk_tf->addr, 1);
-
-	pte = pmap_read(&m);
-	pte &= (~PTE_RW_BIT);
-	pmap_write (&m, pte, 0xFFF);
-	pmap_close (&m);
 }
 
 void rk_ret_from_tf(void)
 {
 	ulong cr0;
-	u64 pte;
-	pmap_t m;
 	ulong ip;
 	ulong val;
 	int err = 0;
@@ -508,15 +547,6 @@ void rk_ret_from_tf(void)
 	cr0 |= CR0_WP_BIT;
 	asm_vmwrite (VMCS_CR0_READ_SHADOW, cr0);
 	asm_vmwrite (VMCS_GUEST_CR0, cr0);
-
-	//make sure the page is read-only after entry!
-	pmap_open_vmm (&m, current->spt.cr3tbl_phys, current->spt.levels);
-	pmap_seek (&m, p_rk_tf->addr, 1);
-
-	pte = pmap_read(&m);
-	pte &= (~PTE_RW_BIT);
-	pmap_write (&m, pte, 0xFFF);
-	pmap_close (&m);
 }
 
 INITFUNC("global4", rk_init_global);

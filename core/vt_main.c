@@ -365,9 +365,11 @@ call_vt__vmresume (void)
 	}
 	*/
 
+	/*
 	if((current->u.vt.vr.rk_tf.tf) && (current->u.vt.vr.rk_tf.other_interrput_during_tf)){
 		guest_backtrace();
 	}
+	*/
 
 	if (asm_vmresume_regs (&current->u.vt.vr))
 		return VT__VMENTRY_FAILED;
@@ -442,7 +444,7 @@ vt__vm_run (void)
 			if (vii.s.valid == INTR_INFO_VALID_VALID) {
 				if(vii.s.type == INTR_INFO_TYPE_HARD_EXCEPTION){
 					if (vii.s.vector == EXCEPTION_DB){
-						printf("====[Return From TF]====\n");
+						//printf("====[Return From TF]====\n");
 						current->u.vt.vr.rk_tf.has_ret_from_tf = true;
 					}
 				}
@@ -505,9 +507,9 @@ vt__vm_run_with_rk_tf (void)
 
 	rk_entry_before_tf();
 	
-	printf("====[VMM Entry RK_TF]====\n");
+	//printf("====[VMM Entry RK_TF]====\n");
 	vt__vm_run ();
-	printf("====[VMM Exit RK_TF]====\n");
+	//printf("====[VMM Exit RK_TF]====\n");
 }
 
 #endif

@@ -514,8 +514,9 @@ static void rk_win_init(void)
 	dump_ko();
 	rk_win_readfromguest();
 	rk_win_fill_ssdt_entries(win_ko.pNTDLLMaped);
-	//rk_win_protectpereadonlysections();
+	rk_win_protectpereadonlysections();
 
+	printf("[RKAnalyzer]Protecting SSDT Table...\n");
 	if(!rk_protect_mmarea(win_ko.pSSDT, win_ko.pSSDT + 4 * win_ko.NumberOfService - 1,"SSDT", mmprotect_callback_win_ssdt, NULL)){
 		printf("[RKAnalyzer]Failed Adding MM Area...\n");
 	}
