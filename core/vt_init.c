@@ -245,6 +245,9 @@ vt__vmcs_init (void)
 		      VMCS_PROC_BASED_VMEXEC_CTL_INVLPGEXIT_BIT |
 		      VMCS_PROC_BASED_VMEXEC_CTL_UNCONDIOEXIT_BIT |
 		      VMCS_PROC_BASED_VMEXEC_CTL_USETSCOFF_BIT |
+#ifdef RK_ANALYZER
+		      VMCS_PROC_BASED_VMEXEC_CTL_MOVDREXIT_BIT |	
+#endif
 		      procbased_ctls_or) & procbased_ctls_and);
 	asm_vmwrite (VMCS_EXCEPTION_BMP, 0xFFFFFFFF);
 	asm_vmwrite (VMCS_PAGEFAULT_ERRCODE_MASK, 0);

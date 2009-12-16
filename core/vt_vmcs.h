@@ -44,6 +44,11 @@ enum exit_qual_cr_type {
 	EXIT_QUAL_CR_TYPE_LMSW = 3,
 };
 
+enum exit_qual_dr_type {
+	EXIT_QUAL_DR_TYPE_MOV_TO_DR = 0,
+	EXIT_QUAL_DR_TYPE_MOV_FROM_DR = 1,
+};
+
 enum exit_qual_io_dir {
 	EXIT_QUAL_IO_DIR_OUT = 0,
 	EXIT_QUAL_IO_DIR_IN = 1,
@@ -130,6 +135,16 @@ struct intr_info {
 	unsigned int nmi : 1;
 	unsigned int reserved : 18;
 	enum intr_info_valid valid : 1;
+} __attribute__ ((packed));
+
+struct exit_qual_dr {
+	enum debug_reg num : 3;
+	unsigned int reserved1 : 1;
+	enum exit_qual_dr_type type : 1;
+	unsigned int reserved2 : 3;
+	enum general_reg reg : 4;
+	unsigned int reserved3 : 20;
+	unsigned int reserved4 : 32;
 } __attribute__ ((packed));
 
 #endif

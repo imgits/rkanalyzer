@@ -397,6 +397,126 @@ vt_write_control_reg (enum control_reg reg, ulong val)
 	}
 }
 
+
+void vt_read_debug_reg (enum debug_reg reg, ulong *val)
+{
+	ulong tmp_val;
+
+	switch (reg) {
+	case DEBUG_REG_DR0:
+		if(current->u.vt.vr.rk_tf.dr_shadow_flag & DR_SHADOW_DR0){
+			*val = current->u.vt.vr.rk_tf.dr0_shadow;
+		}
+		else{
+			asm volatile ("mov %%db0, %0" : "=r"(tmp_val));
+			*val = tmp_val;
+		}
+		break;
+	case DEBUG_REG_DR1:
+		if(current->u.vt.vr.rk_tf.dr_shadow_flag & DR_SHADOW_DR1){
+			*val = current->u.vt.vr.rk_tf.dr1_shadow;
+		}
+		else{
+			asm volatile ("mov %%db1, %0" : "=r"(tmp_val));
+			*val = tmp_val;
+		}
+		break;
+	case DEBUG_REG_DR2:
+		if(current->u.vt.vr.rk_tf.dr_shadow_flag & DR_SHADOW_DR2){
+			*val = current->u.vt.vr.rk_tf.dr2_shadow;
+		}
+		else{
+			asm volatile ("mov %%db2, %0" : "=r"(tmp_val));
+			*val = tmp_val;
+		}
+		break;
+	case DEBUG_REG_DR3:
+		if(current->u.vt.vr.rk_tf.dr_shadow_flag & DR_SHADOW_DR3){
+			*val = current->u.vt.vr.rk_tf.dr3_shadow;
+		}
+		else{
+			asm volatile ("mov %%db3, %0" : "=r"(tmp_val));
+			*val = tmp_val;
+		}
+		break;
+	case DEBUG_REG_DR6:
+		if(current->u.vt.vr.rk_tf.dr_shadow_flag & DR_SHADOW_DR6){
+			*val = current->u.vt.vr.rk_tf.dr6_shadow;
+		}
+		else{
+			asm volatile ("mov %%db6, %0" : "=r"(tmp_val));
+			*val = tmp_val;
+		}
+		break;
+	case DEBUG_REG_DR7:
+		if(current->u.vt.vr.rk_tf.dr_shadow_flag & DR_SHADOW_DR7){
+			*val = current->u.vt.vr.rk_tf.dr7_shadow;
+		}
+		else{
+			asm_vmread(VMCS_GUEST_DR7, val);
+		}
+		break;
+	default:
+		panic ("Fatal error: unknown debug register.");
+	}
+}
+
+void vt_write_debug_reg (enum debug_reg reg, ulong val)
+{
+	switch (reg) {
+	case DEBUG_REG_DR0:
+		if(current->u.vt.vr.rk_tf.dr_shadow_flag & DR_SHADOW_DR0){
+			current->u.vt.vr.rk_tf.dr0_shadow = val;
+		}
+		else{
+			asm volatile ("mov %0, %%db0" : : "r"(val));
+		}
+		break;
+	case DEBUG_REG_DR1:
+		if(current->u.vt.vr.rk_tf.dr_shadow_flag & DR_SHADOW_DR1){
+			current->u.vt.vr.rk_tf.dr1_shadow = val;
+		}
+		else{
+			asm volatile ("mov %0, %%db1" : : "r"(val));
+		}
+		break;
+	case DEBUG_REG_DR2:
+		if(current->u.vt.vr.rk_tf.dr_shadow_flag & DR_SHADOW_DR2){
+			current->u.vt.vr.rk_tf.dr2_shadow = val;
+		}
+		else{
+			asm volatile ("mov %0, %%db2" : : "r"(val));
+		}
+		break;
+	case DEBUG_REG_DR3:
+		if(current->u.vt.vr.rk_tf.dr_shadow_flag & DR_SHADOW_DR3){
+			current->u.vt.vr.rk_tf.dr3_shadow = val;
+		}
+		else{
+			asm volatile ("mov %0, %%db3" : : "r"(val));
+		}
+		break;
+	case DEBUG_REG_DR6:
+		if(current->u.vt.vr.rk_tf.dr_shadow_flag & DR_SHADOW_DR6){
+			current->u.vt.vr.rk_tf.dr6_shadow = val;
+		}
+		else{
+			asm volatile ("mov %0, %%db6" : : "r"(val));
+		}
+		break;
+	case DEBUG_REG_DR7:
+		if(current->u.vt.vr.rk_tf.dr_shadow_flag & DR_SHADOW_DR7){
+			current->u.vt.vr.rk_tf.dr7_shadow = val;
+		}
+		else{
+			asm_vmwrite(VMCS_GUEST_DR7, val);
+		}
+		break;
+	default:
+		panic ("Fatal error: unknown debug register.");
+	}
+}
+
 void
 vt_read_sreg_sel (enum sreg s, u16 *val)
 {

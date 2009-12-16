@@ -584,9 +584,16 @@ asm_wridtr (ulong idtbase, ulong idtlimit)
 }
 
 static inline void
+asm_rddr6 (ulong *dr6)
+{
+	asm volatile ("mov %%db6,%0"
+		      : "=r" (*dr6));
+}
+
+static inline void
 asm_rddr7 (ulong *dr7)
 {
-	asm volatile ("mov %%dr7,%0"
+	asm volatile ("mov %%db7,%0"
 		      : "=r" (*dr7));
 }
 

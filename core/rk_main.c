@@ -17,13 +17,32 @@
 
 #ifdef RK_ANALYZER
 
+debugreg_dispatch dr_dispatcher;
+bool has_setup;
 static spinlock_t mmarea_lock;
+static spinlock_t setup_lock;
 static LIST1_DEFINE_HEAD (struct mm_protected_area, list_mmarea);
+
+bool rk_try_setup (void)
+{
+	spinlock_lock(&setup_lock);
+	if(has_setup){
+		spinlock_unlock(&setup_lock);
+		return false;
+	}
+	
+	has_setup = true;
+	dr_dispatcher = NULL;
+	spinlock_unlock(&setup_lock);
+	return true;
+}
 
 static void
 rk_init_global (void)
 {
+	has_setup = false;
 	spinlock_init(&mmarea_lock);
+	spinlock_init(&setup_lock);
 	LIST1_HEAD_INIT (list_mmarea);
 	printf("MM Protect Area List Initialized...\n");
 }
@@ -363,7 +382,7 @@ void rk_manipulate_mmarea_if_need(virt_t newvirtaddr, u64 gfns){
 
 duplicate:
 	//Step3. Do Duplicate
-	printf("Guest Tries to map protected physical page, gfns = %llX, virtaddr = %lX\n", gfns, newvirtaddr);
+	printf("Guest Tries to map protected physical page, gfns = %llX, virtaddr = %lX, originalvirtaddr = %lX\n", gfns, newvirtaddr, mmarea_gfns->startaddr);
 	newstartaddr = ((newvirtaddr >> PAGESIZE_SHIFT) << (PAGESIZE_SHIFT)) | (mmarea_gfns->startaddr & ~((0xFFFFFFFF >> PAGESIZE_SHIFT) << PAGESIZE_SHIFT));
 	newendaddr = ((newvirtaddr >> PAGESIZE_SHIFT) << (PAGESIZE_SHIFT)) | (mmarea_gfns->endaddr & ~((0xFFFFFFFF >> PAGESIZE_SHIFT) << PAGESIZE_SHIFT));
 	printf("Duplicate MMProtect Area, start = %lX, end = %lX\n", newstartaddr, newendaddr);
@@ -501,6 +520,7 @@ void rk_entry_before_tf(void)
 {
 	ulong cr0toshadow;	
 	ulong val;
+	ulong ip;
 	int err = 0;
 	struct rk_tf_state *p_rk_tf = current->vmctl.get_struct_rk_tf();
 
@@ -509,12 +529,16 @@ void rk_entry_before_tf(void)
 	asm_vmwrite (VMCS_CR0_READ_SHADOW, cr0toshadow);
 	asm_vmwrite (VMCS_GUEST_CR0, cr0toshadow);
 
+	current->vmctl.read_ip(&ip);
+
 	if(p_rk_tf->shouldreportvalue){
 		if((err = read_linearaddr_l(p_rk_tf->addr, &val)) == VMMERR_SUCCESS){
 			printf("Value Before Modification Is : %lX\n", val);
 		}else{
 			printf("Value Before Modification Is Unknown. err : %d\n", err);
 		}
+		
+		printf("Current EIP is 0x%lX\n", ip);
 	}
 }
 

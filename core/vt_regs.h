@@ -60,6 +60,8 @@ void vt_read_general_reg (enum general_reg reg, ulong *val);
 void vt_write_general_reg (enum general_reg reg, ulong val);
 void vt_read_control_reg (enum control_reg reg, ulong *val);
 void vt_write_control_reg (enum control_reg reg, ulong val);
+void vt_read_debug_reg (enum debug_reg reg, ulong *val);
+void vt_write_debug_reg (enum debug_reg reg, ulong val);
 void vt_read_sreg_sel (enum sreg s, u16 *val);
 void vt_read_sreg_acr (enum sreg s, ulong *val);
 void vt_read_sreg_base (enum sreg s, ulong *val);
