@@ -59,4 +59,14 @@ enum general_reg {
 	GENERAL_REG_R15 = 15,
 };
 
+enum debug_reg {
+	DEBUG_REG_DR0 = 0,
+	DEBUG_REG_DR1 = 1,
+	DEBUG_REG_DR2 = 2,
+	DEBUG_REG_DR3 = 3,
+	DEBUG_REG_DR4 = 4,
+	DEBUG_REG_DR6 = 6,
+	DEBUG_REG_DR7 = 7,
+};
+
 #endif

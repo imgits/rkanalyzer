@@ -13,6 +13,18 @@
 #ifdef RK_ANALYZER
 
 #define AREA_TAG_MAXLEN 20
+#define DR6_FLAG_BS 0x4000
+#define DR6_FLAG_BD 0x2000
+#define DR6_FLAG_B0 0x1
+#define DR6_FLAG_B1 0x2
+#define DR6_FLAG_B2 0x4
+#define DR6_FLAG_B3 0x8
+#define DR_SHADOW_DR0 0x1
+#define DR_SHADOW_DR1 0x2
+#define DR_SHADOW_DR2 0x4
+#define DR_SHADOW_DR3 0x8
+#define DR_SHADOW_DR6 0x40
+#define DR_SHADOW_DR7 0x80
 
 enum rk_result{
 	RK_PROTECTED,
@@ -25,6 +37,7 @@ enum rk_result{
 struct mm_protected_area;
 
 typedef void (*mmprotect_callback) (struct mm_protected_area *, virt_t );
+typedef void (*debugreg_dispatch) (int);
 
 // A Protected Memory Area. The startaddr and endaddr must be in the same page.
 struct mm_protected_area{
@@ -47,7 +60,18 @@ struct rk_tf_state{
 	ulong init_pending_count;			//Is there a init 
 	bool shouldreportvalue;				//Should Report Value Before and After Modification?
 	bool if_flag;					//Is IF Flag Set when enter Single Stepping
+	bool should_set_rf_befor_entry;			//Should we set EFLAGS.RF = 1 before entry? This has nothing to do with tf state, but keep it here 								//for the DR Monitor
+	ulong dr_shadow_flag;				//Is Debug Register Shadowed? Each bit reflect one register shadow flag;
+	ulong dr0_shadow;				//DR shadows
+	ulong dr1_shadow;
+	ulong dr2_shadow;
+	ulong dr3_shadow;
+	ulong dr6_shadow;
+	ulong dr7_shadow;
 };
+
+extern bool has_setup;				//Has the module been initialized?
+extern debugreg_dispatch dr_dispatcher;		//Dispatch Routine for Debug Register Monitor
 
 // The startaddr and endaddr could be in different page. The function will handle it and split them to different pages.
 bool rk_protect_mmarea(virt_t startaddr, virt_t endaddr, char* areatag, mmprotect_callback callback_func, struct mm_protected_area* referarea);
@@ -59,6 +83,7 @@ struct mm_protected_area* rk_get_mmarea_byvirtaddr_insamepage(virt_t virtaddr);
 struct mm_protected_area* rk_get_mmarea_original_bygfns(u64 gfns);
 void rk_ret_from_tf(void);
 void rk_entry_before_tf(void);
+bool rk_try_setup(void);
 
 #endif
 

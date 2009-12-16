@@ -75,7 +75,6 @@ static u32 stat_hltcnt = 0;
 #ifdef RK_ANALYZER
 static spinlock_t rk_tf_lock;
 static spinlock_t wait_for_null_loop_lock;
-static volatile struct vcpu *current_cpu_in_rk_tf = NULL;
 
 #define ICR_MODE_NMI		0x400
 #define ICR_MODE_INIT		0x500
@@ -92,6 +91,34 @@ static volatile struct vcpu *current_cpu_in_rk_tf = NULL;
 #define ICR_DEST_OTHER		0xC0000
 #define ICR_DEST_ALL		0x80000
 
+#endif
+
+#ifdef RK_ANALYZER
+static void
+do_mov_dr (void)
+{
+	ulong val;
+	union {
+		struct exit_qual_dr s;
+		ulong v;
+	} eqc;
+
+	asm_vmread (VMCS_EXIT_QUALIFICATION, &eqc.v);
+	switch (eqc.s.type) {
+	case EXIT_QUAL_DR_TYPE_MOV_TO_DR:
+		vt_read_general_reg (eqc.s.reg, &val);
+		vt_write_debug_reg (eqc.s.num, val);
+		break;
+	case EXIT_QUAL_DR_TYPE_MOV_FROM_DR:
+		vt_read_debug_reg (eqc.s.num, &val);
+		vt_write_general_reg (eqc.s.reg, val);
+		break;
+	default:
+		panic ("Fatal error: Not implemented.");
+	}
+	//printf("Guest MOV DR! type=%d, num=%d, reg=%d, val=0x%lx\n", eqc.s.type, eqc.s.num, eqc.s.reg, val);
+	add_ip ();
+}
 #endif
 
 static void
@@ -181,6 +208,9 @@ do_exception (void)
 	ulong len;
 	enum vmmerr err;
 	ulong errc;
+#ifdef RK_ANALYZER
+	ulong fake_dr6;
+#endif
 
 	asm_vmread (VMCS_VMEXIT_INTR_INFO, &vii.v);
 	if (vii.s.valid == INTR_INFO_VALID_VALID) {
@@ -188,9 +218,21 @@ do_exception (void)
 		case INTR_INFO_TYPE_HARD_EXCEPTION:
 			STATUS_UPDATE (asm_lock_incl (&stat_hwexcnt));
 #ifdef RK_ANALYZER
-			if (vii.s.vector == EXCEPTION_DB)
+			if (vii.s.vector == EXCEPTION_DB){
+				asm_vmread (VMCS_EXIT_QUALIFICATION, &fake_dr6);
+				if(dr_dispatcher != NULL){
+					if(fake_dr6 & DR6_FLAG_B0)
+						dr_dispatcher(0);
+					if(fake_dr6 & DR6_FLAG_B1)
+						dr_dispatcher(1);
+					if(fake_dr6 & DR6_FLAG_B2)
+						dr_dispatcher(2);
+					if(fake_dr6 & DR6_FLAG_B3)
+						dr_dispatcher(3);
+				}
 				break;
-			
+			}
+							
 			if (vii.s.vector == EXCEPTION_DB && (!(current->u.vt.vr.rk_tf.tf))){
 				printf("====WARNING.INJECT DB INTO GUEST ON CPU %d====\n", get_cpu_id());
 			}				
@@ -390,6 +432,7 @@ vt__vm_run_first (void)
 	}
 }
 
+/*
 static bool test_rk_tf(struct vcpu *p, void *q){
 	if(p->u.vt.vr.rk_tf.tf && (p != current)){
 		if(q){
@@ -400,6 +443,7 @@ static bool test_rk_tf(struct vcpu *p, void *q){
 
 	return false;
 }
+*/
 
 static void
 vt__vm_run (void)
@@ -411,6 +455,7 @@ vt__vm_run (void)
 	} vii;
 	ulong rflags;
 	ulong exit_reason;
+	ulong fake_dr6;
 #endif
 	enum vt__status status;
 
@@ -421,6 +466,14 @@ vt__vm_run (void)
 
 	if(current->u.vt.vr.rk_tf.tf){
 		//printf("====[VMM Entry ON CPU %d]====\n", get_cpu_id());
+	}
+
+	if(current->u.vt.vr.rk_tf.should_set_rf_befor_entry){
+		vt_read_flags (&rflags);
+		rflags |= RFLAGS_RF_BIT;
+		vt_write_flags (rflags);
+
+		current->u.vt.vr.rk_tf.should_set_rf_befor_entry = false;	//A once-keep state.
 	}
 #endif
 
@@ -444,8 +497,12 @@ vt__vm_run (void)
 			if (vii.s.valid == INTR_INFO_VALID_VALID) {
 				if(vii.s.type == INTR_INFO_TYPE_HARD_EXCEPTION){
 					if (vii.s.vector == EXCEPTION_DB){
-						//printf("====[Return From TF]====\n");
-						current->u.vt.vr.rk_tf.has_ret_from_tf = true;
+						//Check DR6 status
+						asm_vmread (VMCS_EXIT_QUALIFICATION, &fake_dr6);
+						if((fake_dr6 & DR6_FLAG_BS) != 0){
+							//printf("====[Return From TF]====\n");
+							current->u.vt.vr.rk_tf.has_ret_from_tf = true;
+						}
 					}
 				}
 			}
@@ -860,6 +917,11 @@ vt__exit_reason (void)
 	case EXIT_REASON_TASK_SWITCH:
 		do_task_switch ();
 		break;
+#ifdef RK_ANALYZER
+	case EXIT_REASON_MOV_DR:
+		do_mov_dr ();
+		break;
+#endif		
 	default:
 		printf ("Fatal error: handler not implemented.\n");
 		printexitreason (exit_reason);
