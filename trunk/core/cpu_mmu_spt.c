@@ -2386,7 +2386,7 @@ cpu_mmu_spt_pagefault (ulong err, ulong cr2)
 	//Only Intercept in supervisor mode,and Present pages.
 	if(wr && (!us) && (err & PAGEFAULT_ERR_P_BIT)){	
 		current->vmctl.read_ip(&ip);	
-		rk_res = rk_callfunc_if_addr_protected(cr2);
+		rk_res = rk_callfunc_if_addr_protected(cr2, false);
 		if((rk_res == RK_UNPROTECTED_IN_PROTECTED_AREA) || (rk_res == RK_PROTECTED) || (rk_res == RK_PROTECTED_BYSYSTEM)){
 			if((rk_res == RK_PROTECTED) || (rk_res == RK_PROTECTED_BYSYSTEM)){
 				p_rk_tf->shouldreportvalue = true;
@@ -2418,7 +2418,7 @@ cpu_mmu_spt_pagefault (ulong err, ulong cr2)
 #ifdef RK_ANALYZER
 		if(wr && (!us) && (!no_wr_fault_dispatch)){	
 			current->vmctl.read_ip(&ip);	
-			rk_res = rk_callfunc_if_addr_protected(cr2);
+			rk_res = rk_callfunc_if_addr_protected(cr2, false);
 			if((rk_res == RK_UNPROTECTED_IN_PROTECTED_AREA) || (rk_res == RK_PROTECTED) || (rk_res == RK_PROTECTED_BYSYSTEM)){
 				if((rk_res == RK_PROTECTED) || (rk_res == RK_PROTECTED_BYSYSTEM)){
 					p_rk_tf->shouldreportvalue = true;

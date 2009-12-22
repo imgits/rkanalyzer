@@ -75,6 +75,7 @@
 #define LIST1_FOREACH_DELETABLE(head, var, varn) \
 	for (var = (head).next; var && ((varn = var->next), 1); \
 	     var = varn)
+#define LIST1_EMPTY(head) ((head).next == NULL)
 
 /* usage:
    struct foo {
@@ -128,6 +129,7 @@
 				 &(data)->sx##pnext, &(data)->sx##next, \
 				 (nextd), &(nextd)->sx##pnext) \
 		 : LIST2_ADD (head, sx, (data)))
+#define LIST2_EMPTY(head) ((head).next == NULL)
 
 /* p{p_pn,p_n} -> n{n_pn,n_n} */
 /* p{p_pn,p_n} -> d{d_pn,d_n} -> n{n_pn,n_n} */
