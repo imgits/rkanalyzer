@@ -9,10 +9,12 @@
 
 #include "types.h"
 #include "list.h"
+#include "spinlock.h"
 
 #ifdef RK_ANALYZER
 
 #define AREA_TAG_MAXLEN 20
+#define PROPERTY_MAX 10
 #define DR6_FLAG_BS 0x4000
 #define DR6_FLAG_BD 0x2000
 #define DR6_FLAG_B0 0x1
@@ -36,33 +38,79 @@ enum rk_result{
 
 struct mm_protected_area;
 
-typedef void (*mmprotect_callback) (struct mm_protected_area *, virt_t );
+//area, virtual address that violation occur
+//display, if display is false, then no message should be print out
+//bool = true: the access is invalid
+//bool = false: the access is valid, bypass it
+typedef bool (*mmprotect_callback) (struct mm_protected_area *, virt_t, bool display);
 typedef void (*debugreg_dispatch) (int);
 
 // A Protected Memory Area. The startaddr and endaddr must be in the same page.
 struct mm_protected_area{
-	LIST1_DEFINE (struct mm_protected_area);
-	virt_t	startaddr;
-	virt_t	endaddr;
-	u64 gfns;
-	char		areatag[AREA_TAG_MAXLEN + 1];
-	mmprotect_callback callback_func;
-	bool 	page_wr_setbysystem;			//Is the wr bit set by us or the system
-	struct mm_protected_area *referarea;		//If this area is original, set this to NULL; else set it to the area copied from.
+	LIST2_DEFINE (struct mm_protected_area, forpage);
+	LIST2_DEFINE (struct mm_protected_area, forvarange);
+	virt_t startaddr;
+	virt_t endaddr;
+	struct mm_protected_page *page;			//The page that this area belongs to
+	struct mm_protected_varange *varange;	//The VA Range that this area belongs to
 };
 
+// A Protected Virtual Address Range. It contains protected areas, only original ones, which are divided into pages
+struct mm_protected_varange{
+	LIST1_DEFINE (struct mm_protected_varange);
+	LIST2_DEFINE_HEAD (areas_in_varange, struct mm_protected_area, forvarange);
+
+	virt_t startaddr;
+	virt_t endaddr;
+	char areatag[AREA_TAG_MAXLEN + 1];
+	mmprotect_callback callback_func;
+	ulong properties[PROPERTY_MAX];			//properties
+};
+
+struct mm_protected_page_samegfns{
+	LIST1_DEFINE (struct mm_protected_page_samegfns);
+	ulong	pfn;								//Page Frame Number; this should never changed after initialized
+	struct mm_protected_page_samegfns_list *list_belong;			//The List this derived page belong to
+	bool 	page_wr_setbysystem;						//Is the wr bit set by us or the system
+};
+
+struct mm_protected_page_samegfns_list{
+	LIST1_DEFINE_HEAD (struct mm_protected_page_samegfns, pages_of_samegfns);
+	u64 gfns;								//physical mem frame number
+	ulong refcount;								//reference count; when use by original page, add by 1; when original
+										//page deleted or remapped, reduce by 1.
+};
+
+// A Protected Page. It may contain many protected areas.
+struct mm_protected_page{
+	LIST1_DEFINE (struct mm_protected_page);
+	struct mm_protected_page_samegfns_list *p_page_samegfns_list;		//Original Page with the same gfns share the same list;
+	LIST2_DEFINE_HEAD (areas_in_page, struct mm_protected_area, forpage);	//areas list; when this list is empty, we delete this page from our list
+										//and restore the W/R flag according to whether it had been set by system
+	ulong	pfn;								//Page Frame Number; this should never changed after initialized
+	u64	gfns;								//physical mem frame number
+	bool	never_paged_in_yet;						//has never paged in yet;
+	bool 	page_wr_setbysystem;						//Is the wr bit set by us or the system
+};
+
+/*
+	state per vcpu.
+	We store all variables that differs in each vcpu here.
+*/
 struct rk_tf_state{
-	bool tf;					//Should run with tf? This is a once-set switch
-	bool has_ret_from_tf;				//Set this flag after return from tf. Clear it before the next entry.
-	bool other_interrput_during_tf;			//Other Interrupt During TF;
-	virt_t	addr;					//The violation address
-	u64 originalpte;				//Original PTE.we write it back after TF
-	ulong init_pending_count;			//Is there a init 
+	bool initialized;
+	spinlock_t init_lock;
+	
+	bool tf;							//Should run with tf? This is a once-set switch
+	bool dont_pass_db;					//Should Inhibit #DB pass to guest?
+	virt_t	addr;						//The violation address
+	ulong originalval;					//Original Value
+	ulong last_eip;						//EIP before the instruction
 	bool shouldreportvalue;				//Should Report Value Before and After Modification?
-	bool if_flag;					//Is IF Flag Set when enter Single Stepping
-	bool should_set_rf_befor_entry;			//Should we set EFLAGS.RF = 1 before entry? This has nothing to do with tf state, but keep it here 								//for the DR Monitor
+	bool has_modify_if_flag;			//Did we modified if flag when enter single stepping?
+	bool should_set_rf_befor_entry;		//Should we set EFLAGS.RF = 1 before entry? This has nothing to do with tf state, but keep it here 											//for the DR Monitor
 	ulong dr_shadow_flag;				//Is Debug Register Shadowed? Each bit reflect one register shadow flag;
-	ulong dr0_shadow;				//DR shadows
+	ulong dr0_shadow;					//DR shadows
 	ulong dr1_shadow;
 	ulong dr2_shadow;
 	ulong dr3_shadow;
@@ -74,16 +122,15 @@ extern bool has_setup;				//Has the module been initialized?
 extern debugreg_dispatch dr_dispatcher;		//Dispatch Routine for Debug Register Monitor
 
 // The startaddr and endaddr could be in different page. The function will handle it and split them to different pages.
-bool rk_protect_mmarea(virt_t startaddr, virt_t endaddr, char* areatag, mmprotect_callback callback_func, struct mm_protected_area* referarea);
+bool rk_protect_mmarea(virt_t startaddr, virt_t endaddr, char* areatag, mmprotect_callback callback_func, ulong *properties, int properties_count);
+bool rk_unprotect_mmarea(virt_t startaddr, virt_t endaddr);
 void rk_manipulate_mmarea_if_need(virt_t newvirtaddr, u64 gfns);
 
-enum rk_result rk_is_addr_protected(virt_t virtaddr);
-enum rk_result rk_callfunc_if_addr_protected(virt_t virtaddr);
-struct mm_protected_area* rk_get_mmarea_byvirtaddr_insamepage(virt_t virtaddr);
-struct mm_protected_area* rk_get_mmarea_original_bygfns(u64 gfns);
-void rk_ret_from_tf(void);
+enum rk_result rk_callfunc_if_addr_protected(virt_t virtaddr, bool display);
+void rk_ret_from_tf(bool was_instruction_carried_out);
 void rk_entry_before_tf(void);
-bool rk_try_setup(void);
+bool rk_try_setup_global(void);
+bool rk_try_setup_per_vcpu(void);
 
 #endif
 

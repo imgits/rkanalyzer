@@ -5,6 +5,8 @@
 #include "list.h"
 
 #define rk_struct_win_offset(type, member) (size_t)(&((type *)0)->member)
+#define CURRENT_THREAD_OFFSET_IN_KPCR 0x124
+#define SWAP_CONTEXT_ENTRY_OFFSET_IN_KERNEL 0x3A9CC
 
 typedef struct _IMAGE_DOS_HEADER {      // DOS .EXE header
     u16   e_magic;                     // Magic number

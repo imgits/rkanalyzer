@@ -232,10 +232,15 @@ do_exception (void)
 				}
 				break;
 			}
+			
+			if (vii.s.vector == EXCEPTION_DB && current->u.vt.vr.rk_tf.dont_pass_db){
+				current->u.vt.vr.rk_tf.dont_pass_db = false;
+				break;
+			}
 							
-			if (vii.s.vector == EXCEPTION_DB && (!(current->u.vt.vr.rk_tf.tf))){
-				printf("====WARNING.INJECT DB INTO GUEST ON CPU %d====\n", get_cpu_id());
-			}				
+			if (vii.s.vector == EXCEPTION_DB &&
+			    current->u.vt.vr.sw.enable)
+				break;		
 #else
 			if (vii.s.vector == EXCEPTION_DB &&
 			    current->u.vt.vr.sw.enable)
@@ -399,20 +404,6 @@ call_vt__vmlaunch (void)
 static enum vt__status
 call_vt__vmresume (void)
 {
-	/*
-	if((current->u.vt.vr.rk_tf.tf) && (!(current->u.vt.vr.rk_tf.other_interrput_during_tf))){
-		printf("RAX %08lX RCX %08lX RDX %08lX RBX %08lX\n", current->u.vt.vr.rax, current->u.vt.vr.rcx, current->u.vt.vr.rdx, current->u.vt.vr.rbx);
-		printf("CR2 %08lX RBP %08lX RSI %08lX RDI %08lX\n", current->u.vt.vr.cr2, current->u.vt.vr.rbp, current->u.vt.vr.rsi, current->u.vt.vr.rdi);
-		printf("VMCS PHYSICAL ADDR %llX\n", currentcpu->vt.vmcs_region_phys);	
-	}
-	*/
-
-	/*
-	if((current->u.vt.vr.rk_tf.tf) && (current->u.vt.vr.rk_tf.other_interrput_during_tf)){
-		guest_backtrace();
-	}
-	*/
-
 	if (asm_vmresume_regs (&current->u.vt.vr))
 		return VT__VMENTRY_FAILED;
 	return VT__VMEXIT;
@@ -449,25 +440,11 @@ static void
 vt__vm_run (void)
 {
 #ifdef RK_ANALYZER
-	union {
-	struct intr_info s;
-	ulong v;
-	} vii;
 	ulong rflags;
-	ulong exit_reason;
-	ulong fake_dr6;
 #endif
 	enum vt__status status;
 
 #ifdef RK_ANALYZER
-	if(current->u.vt.vr.rk_tf.has_ret_from_tf){
-		rk_ret_from_tf();
-	}
-
-	if(current->u.vt.vr.rk_tf.tf){
-		//printf("====[VMM Entry ON CPU %d]====\n", get_cpu_id());
-	}
-
 	if(current->u.vt.vr.rk_tf.should_set_rf_befor_entry){
 		vt_read_flags (&rflags);
 		rflags |= RFLAGS_RF_BIT;
@@ -484,47 +461,6 @@ vt__vm_run (void)
 		else
 			panic ("Fatal error: Strange status.");
 	}
-
-#ifdef RK_ANALYZER
-	if(current->u.vt.vr.rk_tf.tf){
-		//printf("====[VMM Exit ON CPU %d]====\n", get_cpu_id());
-
-		// IF we are in tf, check if we return from #TF
-		asm_vmread (VMCS_EXIT_REASON, &exit_reason);
-
-		if((exit_reason & EXIT_REASON_MASK) == EXIT_REASON_EXCEPTION_OR_NMI){
-			asm_vmread (VMCS_VMEXIT_INTR_INFO, &vii.v);
-			if (vii.s.valid == INTR_INFO_VALID_VALID) {
-				if(vii.s.type == INTR_INFO_TYPE_HARD_EXCEPTION){
-					if (vii.s.vector == EXCEPTION_DB){
-						//Check DR6 status
-						asm_vmread (VMCS_EXIT_QUALIFICATION, &fake_dr6);
-						if((fake_dr6 & DR6_FLAG_BS) != 0){
-							//printf("====[Return From TF]====\n");
-							current->u.vt.vr.rk_tf.has_ret_from_tf = true;
-						}
-					}
-				}
-			}
-		}
-
-		if(!current->u.vt.vr.rk_tf.has_ret_from_tf){
-			current->u.vt.vr.rk_tf.other_interrput_during_tf = true;		//Set this flag to execute continously
-		}else{
-			current->u.vt.vr.rk_tf.other_interrput_during_tf = false;
-			vt_read_flags (&rflags);
-			//Restore IF Flag
-			if(current->u.vt.vr.rk_tf.if_flag){
-				rflags |= RFLAGS_IF_BIT;
-			}
-			else{
-				rflags &= ~RFLAGS_IF_BIT;
-			}
-			rflags &= ~RFLAGS_TF_BIT;
-			vt_write_flags (rflags);
-		}
-	}
-#endif
 }
 
 /* FIXME: bad handling of TF bit */
@@ -548,25 +484,91 @@ vt__vm_run_with_tf (void)
 static void
 vt__vm_run_with_rk_tf (void)
 {
+	union {
+		struct intr_info s;
+		ulong v;
+	} vii;
 	ulong rflags;
-
-
+	ulong interruptibility_state;
+	ulong activity_state;
+	ulong proc_control;
+	ulong exit_reason;
+	ulong pending_debug_exception;
+	bool instruction_carried_out;
+	ulong fake_dr6;
+	
+	asm_vmread(VMCS_GUEST_INTERRUPTIBILITY_STATE, &interruptibility_state);
+	asm_vmread(VMCS_GUEST_ACTIVITY_STATE, &activity_state);
+	
 	vt_read_flags (&rflags);
-	rflags |= RFLAGS_TF_BIT;
-	if(rflags & RFLAGS_IF_BIT){
-		current->u.vt.vr.rk_tf.if_flag = true;
+	
+	// Check for block by STI, MOV SS, POP SS
+	if(((interruptibility_state & VMCS_GUEST_INTERRUPTIBILITY_STATE_BLOCKING_BY_STI_BIT) != 0) || 
+		((interruptibility_state & VMCS_GUEST_INTERRUPTIBILITY_STATE_BLOCKING_BY_MOV_SS_BIT) != 0)){
+		current->u.vt.vr.rk_tf.has_modify_if_flag = false;
 	}
 	else{
-		current->u.vt.vr.rk_tf.if_flag = false;
+		if(rflags & RFLAGS_IF_BIT){
+			current->u.vt.vr.rk_tf.has_modify_if_flag = true;
+			rflags &= (~RFLAGS_IF_BIT);	//Block Interrupt!
+		}
+		else{
+			current->u.vt.vr.rk_tf.has_modify_if_flag = false;
+		}
 	}
-	rflags &= (~RFLAGS_IF_BIT);	//Block The Timer Interrupt!
+	
+	rflags |= RFLAGS_TF_BIT;
 	vt_write_flags (rflags);
-
+	
+	//Set Pending Debug Exception if neccessory
+	if((activity_state == VMCS_GUEST_ACTIVITY_STATE_HLT) || 
+		((interruptibility_state & VMCS_GUEST_INTERRUPTIBILITY_STATE_BLOCKING_BY_STI_BIT) != 0) || 
+		((interruptibility_state & VMCS_GUEST_INTERRUPTIBILITY_STATE_BLOCKING_BY_MOV_SS_BIT) != 0)){
+		asm_vmread(VMCS_GUEST_PENDING_DEBUG_EXCEPTIONS, &pending_debug_exception);
+		pending_debug_exception |= VMCS_GUEST_PENDING_DEBUG_EXCEPTIONS_BS_BIT;
+		asm_vmwrite(VMCS_GUEST_PENDING_DEBUG_EXCEPTIONS, pending_debug_exception);
+	}
+	
 	rk_entry_before_tf();
 	
 	//printf("====[VMM Entry RK_TF]====\n");
 	vt__vm_run ();
 	//printf("====[VMM Exit RK_TF]====\n");
+	
+	// Restore IF flag if we modified it
+	vt_read_flags (&rflags);
+	
+	// Check for block by STI, MOV SS, POP SS
+	if(current->u.vt.vr.rk_tf.has_modify_if_flag){
+		current->u.vt.vr.rk_tf.has_modify_if_flag = false;
+		rflags |= RFLAGS_IF_BIT;	//Enable Interrupt
+	}
+	
+	rflags &= ~(RFLAGS_TF_BIT);	//Disable TF
+	vt_write_flags (rflags);
+	
+	//Check if the first VM Exit we get is a MTF or other(should be exceptions or nmi, because we have closed interrupt)
+	instruction_carried_out = false;
+	asm_vmread (VMCS_EXIT_REASON, &exit_reason);
+
+	if((exit_reason & EXIT_REASON_MASK) == EXIT_REASON_EXCEPTION_OR_NMI){
+		asm_vmread (VMCS_VMEXIT_INTR_INFO, &vii.v);
+		if (vii.s.valid == INTR_INFO_VALID_VALID) {
+			if (vii.s.type == INTR_INFO_TYPE_HARD_EXCEPTION){
+				if (vii.s.vector == EXCEPTION_DB){
+					asm_vmread (VMCS_EXIT_QUALIFICATION, &fake_dr6);
+					if((fake_dr6 & DR6_FLAG_BS) != 0){
+						//Yes, It's #DB. That's for sure the instruction is carried out
+						instruction_carried_out = true;
+					}
+				}
+			}
+		}
+	}
+	rk_ret_from_tf(instruction_carried_out);
+	
+	current->u.vt.vr.rk_tf.tf = false;
+	current->u.vt.vr.rk_tf.dont_pass_db = true;
 }
 
 #endif
@@ -921,6 +923,10 @@ vt__exit_reason (void)
 	case EXIT_REASON_MOV_DR:
 		do_mov_dr ();
 		break;
+	case EXIT_REASON_MTF:
+		// We do nothing with MTF here
+		// because the handler is implemented in vt__vm_run_with_rk_tf()
+		break;
 #endif		
 	default:
 		printf ("Fatal error: handler not implemented.\n");
@@ -1094,7 +1100,7 @@ vt_mainloop (void)
 		}
 		/* when the state is switching, do single step */
 #ifdef RK_ANALYZER
-		if (current->u.vt.vr.rk_tf.tf && (!(current->u.vt.vr.rk_tf.other_interrput_during_tf))){
+		if (current->u.vt.vr.rk_tf.tf){
 			vt__nmi ();
 			vt__event_delivery_setup ();
 			vt__vm_run_with_rk_tf ();
@@ -1102,10 +1108,6 @@ vt_mainloop (void)
 			vt__event_delivery_check ();
 			vt__exit_reason ();
 			vt__event_delivery_update ();
-			// MAKE SURE WE REALLY RETURNED FROM TF(#DB)
-			if(current->u.vt.vr.rk_tf.has_ret_from_tf){		
-				current->u.vt.vr.rk_tf.tf = false;
-			}
 		}else{
 			if (current->u.vt.vr.sw.enable) {
 				vt__nmi ();
@@ -1123,12 +1125,6 @@ vt_mainloop (void)
 				vt__event_delivery_check ();
 				vt__exit_reason ();
 				vt__event_delivery_update ();
-			}
-			if (current->u.vt.vr.rk_tf.tf){
-				// MAKE SURE WE REALLY RETURNED FROM TF(#DB)
-				if(current->u.vt.vr.rk_tf.has_ret_from_tf){		
-					current->u.vt.vr.rk_tf.tf = false;
-				}
 			}
 		}
 #else
