@@ -44,6 +44,7 @@
 #include "string.h"
 #include "vmmcall_status.h"
 #include "rk_main.h"
+#include "rk_nx.h"
 #include "cpu_interpreter.h"
 #include "vmmerr.h"
 
@@ -2275,28 +2276,7 @@ cpu_mmu_spt_updatecr3 (void)
 void
 cpu_mmu_spt_invalidate (ulong virtual_addr)
 {
-#ifdef RK_ANALYZER
-	u64 pte, pte_gfns;
-	pmap_t m;
-#endif
-
 	invalidate_page (virtual_addr);
-
-#ifdef RK_ANALYZER
-	//Make sure protected memory areas are still protected.
-	//We only check kernel address currently.
-	if(virtual_addr >= 0x80000000) {
-		pmap_open_vmm (&m, current->spt.cr3tbl_phys, current->spt.levels);
-		pmap_seek (&m, virtual_addr, 1);
-		pte = pmap_read(&m);
-		//Make sure the page is present. if not, we don't bother maintain the corresponding protected area.
-		if(pte & PTE_P_BIT){
-			pte_gfns = (pte & PTE_ADDR_MASK64) >> PAGESIZE_SHIFT;
-			rk_manipulate_mmarea_if_need(virtual_addr, pte_gfns);
-		}
-		pmap_close(&m);
-	}
-#endif
 }
 
 static void
@@ -2381,31 +2361,6 @@ cpu_mmu_spt_pagefault (ulong err, ulong cr2)
 	ex = !!(err & PAGEFAULT_ERR_ID_BIT);
 	wp = !!(cr0 & CR0_WP_BIT);
 
-#ifdef RK_ANALYZER		
-	//Modified by Tyrael here.
-	//Only Intercept in supervisor mode,and Present pages.
-	if(wr && (!us) && (err & PAGEFAULT_ERR_P_BIT)){	
-		current->vmctl.read_ip(&ip);	
-		rk_res = rk_callfunc_if_addr_protected(cr2, false);
-		if((rk_res == RK_UNPROTECTED_IN_PROTECTED_AREA) || (rk_res == RK_PROTECTED) || (rk_res == RK_PROTECTED_BYSYSTEM)){
-			if((rk_res == RK_PROTECTED) || (rk_res == RK_PROTECTED_BYSYSTEM)){
-				p_rk_tf->shouldreportvalue = true;
-			}
-			else{
-				p_rk_tf->shouldreportvalue = false;
-			}
-			pmap_open_vmm (&m, current->spt.cr3tbl_phys, current->spt.levels);	
-			pmap_seek (&m, cr2, 1);
-			pte = pmap_read(&m);
-			pmap_close (&m);
-			//We should let the write go, so disable CR0.WP
-			p_rk_tf->tf = true;
-			p_rk_tf->addr = cr2;
-			no_wr_fault_dispatch = true;
-		}
-	}
-#endif
-
 	r = cpu_mmu_get_pte (cr2, cr0, cr3, cr4, efer, wr, us, ex, entries,
 			     &levels);
 
@@ -2414,9 +2369,20 @@ cpu_mmu_spt_pagefault (ulong err, ulong cr2)
 		generate_pf_nopage (err, cr2);
 		break;
 	case VMMERR_PAGE_NOT_ACCESSIBLE:
-
-#ifdef RK_ANALYZER
-		if(wr && (!us) && (!no_wr_fault_dispatch)){	
+		generate_pf_noaccess (err, cr2);
+		break;
+	case VMMERR_PAGE_BAD_RESERVED_BIT:
+		generate_pf_reserved (err, cr2);
+		break;
+	case VMMERR_PAGE_NOT_EXECUTABLE:
+		generate_pf_noexec (err, cr2);
+		break;
+	case VMMERR_SUCCESS:
+#ifdef RK_ANALYZER		
+		//Modified by Tyrael here.
+		//Only Intercept in supervisor mode,and Present pages.
+		//Not Accessible in SPT but Accessible in GPT
+		if(p_rk_tf->initialized && wr && (!us) && (err & PAGEFAULT_ERR_P_BIT)){	
 			current->vmctl.read_ip(&ip);	
 			rk_res = rk_callfunc_if_addr_protected(cr2, false);
 			if((rk_res == RK_UNPROTECTED_IN_PROTECTED_AREA) || (rk_res == RK_PROTECTED) || (rk_res == RK_PROTECTED_BYSYSTEM)){
@@ -2428,25 +2394,17 @@ cpu_mmu_spt_pagefault (ulong err, ulong cr2)
 				}
 				//We should let the write go, so disable CR0.WP
 				p_rk_tf->tf = true;
-				p_rk_tf->addr = cr2;				
+				p_rk_tf->addr = cr2;
 				no_wr_fault_dispatch = true;
 			}
 		}
-
-		if(!no_wr_fault_dispatch){
-			generate_pf_noaccess (err, cr2);
+		
+		//Not Executable in SPT but Executable in GPT
+		if(p_rk_tf->initialized && p_rk_tf->nx_enable && ex && (err & PAGEFAULT_ERR_P_BIT)){	
+			rk_check_code_mmvarange(cr2);
 		}
-#else
-		generate_pf_noaccess (err, cr2);
 #endif
-		break;
-	case VMMERR_PAGE_BAD_RESERVED_BIT:
-		generate_pf_reserved (err, cr2);
-		break;
-	case VMMERR_PAGE_NOT_EXECUTABLE:
-		generate_pf_noexec (err, cr2);
-		break;
-	case VMMERR_SUCCESS:
+	
 		set_m1 (entries[0], wr, us, wp, &m1);
 		set_m2 (entries, levels, m2);
 		set_gfns (entries, levels, gfns);
@@ -2454,7 +2412,13 @@ cpu_mmu_spt_pagefault (ulong err, ulong cr2)
 		if (!mmio_access_page (gfns[0] << PAGESIZE_SHIFT)){
 			map_page (cr2, m1, m2, gfns, levels);
 #ifdef RK_ANALYZER
-			rk_manipulate_mmarea_if_need(cr2, gfns[0]);
+			if(p_rk_tf->initialized && (cr2 >= os_dep.va_kernel_start)){
+				rk_manipulate_mmarea_if_need(cr2, gfns[0]);
+			}
+			
+			if((p_rk_tf->initialized) && (p_rk_tf->nx_enable)){
+				rk_manipulate_code_mmvarange_if_need(cr2, gfns[0]);
+			}
 #endif
 		}
 		mmio_unlock ();

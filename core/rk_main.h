@@ -10,6 +10,7 @@
 #include "types.h"
 #include "list.h"
 #include "spinlock.h"
+#include "rk_nx.h"
 
 #ifdef RK_ANALYZER
 
@@ -28,6 +29,15 @@
 #define DR_SHADOW_DR6 0x40
 #define DR_SHADOW_DR7 0x80
 
+#define CPL_KERNEL	0
+#define CPL_USER	3
+
+#ifdef __x86_64__
+#define MAX_VA		0xFFFFFFFFFFFFFFFFULL
+#else
+#define MAX_VA		0xFFFFFFFFUL
+#endif
+
 enum rk_result{
 	RK_PROTECTED,
 	RK_PROTECTED_BYSYSTEM,
@@ -44,6 +54,7 @@ struct mm_protected_area;
 //bool = false: the access is valid, bypass it
 typedef bool (*mmprotect_callback) (struct mm_protected_area *, virt_t, bool display);
 typedef void (*debugreg_dispatch) (int);
+typedef void (*os_dependent_setter) (void);
 
 // A Protected Memory Area. The startaddr and endaddr must be in the same page.
 struct mm_protected_area{
@@ -108,7 +119,9 @@ struct rk_tf_state{
 	ulong last_eip;						//EIP before the instruction
 	bool shouldreportvalue;				//Should Report Value Before and After Modification?
 	bool has_modify_if_flag;			//Did we modified if flag when enter single stepping?
-	bool should_set_rf_befor_entry;		//Should we set EFLAGS.RF = 1 before entry? This has nothing to do with tf state, but keep it here 											//for the DR Monitor
+	
+	bool should_set_rf_befor_entry;		//Should we set EFLAGS.RF = 1 before entry? This has nothing to do with tf state, but keep it here
+										//for the DR Monitor
 	ulong dr_shadow_flag;				//Is Debug Register Shadowed? Each bit reflect one register shadow flag;
 	ulong dr0_shadow;					//DR shadows
 	ulong dr1_shadow;
@@ -116,10 +129,25 @@ struct rk_tf_state{
 	ulong dr3_shadow;
 	ulong dr6_shadow;
 	ulong dr7_shadow;
+	
+	bool nx_enable;						//NX Protection Enabled?
+	bool current_code_legal;			//Are we currently executing legal code? Only valid for kernel(CPL = 0)
+	u16 cpl_last;						//The CPL of last switch
+	bool disable_protect;				//Should Disable Protection? so W/R bit won't be set
+	bool guest_msr_efer_nxe;			//Is NXE of MSR_IA32_EFER in guest set? This is used for shadow,lalala
 };
 
-extern bool has_setup;				//Has the module been initialized?
-extern debugreg_dispatch dr_dispatcher;		//Dispatch Routine for Debug Register Monitor
+struct os_dependent{
+	ulong va_kernel_start;				//Kernel Page Start Virtual Address
+	debugreg_dispatch dr_dispatcher;		//Dispatch Routine for Debug Register Monitor
+	
+	//Dispatch Routine for Unknown code check.
+	//NB: DO NOT CALL ANY FUNCTION OF rk_nx.h IN THIS FUNCTION!!!!!!!!!!
+	unknown_code_check_dispatch unknown_code_check_dispatcher;	
+};
+
+extern volatile struct os_dependent os_dep;
+extern volatile bool rk_has_setup;				//Has the module been initialized?
 
 // The startaddr and endaddr could be in different page. The function will handle it and split them to different pages.
 bool rk_protect_mmarea(virt_t startaddr, virt_t endaddr, char* areatag, mmprotect_callback callback_func, ulong *properties, int properties_count);
@@ -129,8 +157,14 @@ void rk_manipulate_mmarea_if_need(virt_t newvirtaddr, u64 gfns);
 enum rk_result rk_callfunc_if_addr_protected(virt_t virtaddr, bool display);
 void rk_ret_from_tf(bool was_instruction_carried_out);
 void rk_entry_before_tf(void);
-bool rk_try_setup_global(void);
+
+// Common Routines
+bool rk_try_setup_global(os_dependent_setter os_dep_setter);
 bool rk_try_setup_per_vcpu(void);
+
+void toogle_debug_print(void);
+bool is_debug(void);
+int dbgprint(const char *format, ...);
 
 #endif
 

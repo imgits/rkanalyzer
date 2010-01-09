@@ -27,22 +27,22 @@ typedef struct _IMAGE_DOS_HEADER {      // DOS .EXE header
     u16   e_oemid;                     // OEM identifier (for e_oeminfo)
     u16   e_oeminfo;                   // OEM information; e_oemid specific
     u16   e_res2[10];                  // Reserved u16s
-    ulong   e_lfanew;                    // File address of new exe header
+    u32   e_lfanew;                    // File address of new exe header
   } IMAGE_DOS_HEADER, *PIMAGE_DOS_HEADER;
 
 typedef struct _IMAGE_FILE_HEADER {
     u16    Machine;
     u16    NumberOfSections;
-    ulong   TimeDateStamp;
-    ulong   PointerToSymbolTable;
-    ulong   NumberOfSymbols;
+    u32   TimeDateStamp;
+    u32   PointerToSymbolTable;
+    u32   NumberOfSymbols;
     u16    SizeOfOptionalHeader;
     u16    Characteristics;
 } IMAGE_FILE_HEADER, *PIMAGE_FILE_HEADER;
 
 typedef struct _IMAGE_DATA_DIRECTORY {
-    ulong   VirtualAddress;
-    ulong   Size;
+    u32   VirtualAddress;
+    u32   Size;
 } IMAGE_DATA_DIRECTORY, *PIMAGE_DATA_DIRECTORY;
 
 #define IMAGE_NUMBEROF_DIRECTORY_ENTRIES    16
@@ -55,43 +55,43 @@ typedef struct _IMAGE_OPTIONAL_HEADER {
     u16    Magic;
     u8    MajorLinkerVersion;
     u8    MinorLinkerVersion;
-    ulong   SizeOfCode;
-    ulong   SizeOfInitializedData;
-    ulong   SizeOfUninitializedData;
-    ulong   AddressOfEntryPoint;
-    ulong   BaseOfCode;
-    ulong   BaseOfData;
+    u32   SizeOfCode;
+    u32   SizeOfInitializedData;
+    u32   SizeOfUninitializedData;
+    u32   AddressOfEntryPoint;
+    u32   BaseOfCode;
+    u32   BaseOfData;
 
     //
     // NT additional fields.
     //
 
-    ulong   ImageBase;
-    ulong   SectionAlignment;
-    ulong   FileAlignment;
+    u32   ImageBase;
+    u32   SectionAlignment;
+    u32   FileAlignment;
     u16    MajorOperatingSystemVersion;
     u16    MinorOperatingSystemVersion;
     u16    MajorImageVersion;
     u16    MinorImageVersion;
     u16    MajorSubsystemVersion;
     u16    MinorSubsystemVersion;
-    ulong   Win32VersionValue;
-    ulong   SizeOfImage;
-    ulong   SizeOfHeaders;
-    ulong   CheckSum;
+    u32   Win32VersionValue;
+    u32   SizeOfImage;
+    u32   SizeOfHeaders;
+    u32   CheckSum;
     u16    Subsystem;
     u16    DllCharacteristics;
-    ulong   SizeOfStackReserve;
-    ulong   SizeOfStackCommit;
-    ulong   SizeOfHeapReserve;
-    ulong   SizeOfHeapCommit;
-    ulong   LoaderFlags;
-    ulong   NumberOfRvaAndSizes;
+    u32   SizeOfStackReserve;
+    u32   SizeOfStackCommit;
+    u32   SizeOfHeapReserve;
+    u32   SizeOfHeapCommit;
+    u32   LoaderFlags;
+    u32   NumberOfRvaAndSizes;
     IMAGE_DATA_DIRECTORY DataDirectory[IMAGE_NUMBEROF_DIRECTORY_ENTRIES];
 } IMAGE_OPTIONAL_HEADER, *PIMAGE_OPTIONAL_HEADER;
 
 typedef struct _IMAGE_NT_HEADERS {
-    ulong Signature;
+    u32 Signature;
     IMAGE_FILE_HEADER FileHeader;
     IMAGE_OPTIONAL_HEADER OptionalHeader;
 } IMAGE_NT_HEADERS, *PIMAGE_NT_HEADERS;
@@ -114,23 +114,23 @@ typedef struct _IMAGE_NT_HEADERS {
 #define IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR 14   // COM Runtime descriptor
 
 typedef struct _IMAGE_EXPORT_DIRECTORY {
-    ulong   Characteristics;
-    ulong   TimeDateStamp;
+    u32   Characteristics;
+    u32   TimeDateStamp;
     u16    MajorVersion;
     u16    MinorVersion;
-    ulong   Name;
-    ulong   Base;
-    ulong   NumberOfFunctions;
-    ulong   NumberOfNames;
-    ulong   AddressOfFunctions;     // RVA from base of image
-    ulong   AddressOfNames;         // RVA from base of image
-    ulong   AddressOfNameOrdinals;  // RVA from base of image
+    u32   Name;
+    u32   Base;
+    u32   NumberOfFunctions;
+    u32   NumberOfNames;
+    u32   AddressOfFunctions;     // RVA from base of image
+    u32   AddressOfNames;         // RVA from base of image
+    u32   AddressOfNameOrdinals;  // RVA from base of image
 } IMAGE_EXPORT_DIRECTORY, *PIMAGE_EXPORT_DIRECTORY;
 
 // IMAGE_FIRST_SECTION doesn't need 32/64 versions since the file header is the same either way.
 
 #define IMAGE_FIRST_SECTION( ntheader ) ((PIMAGE_SECTION_HEADER)        \
-    ((ULONG_PTR)ntheader +                                              \
+    ((u32_PTR)ntheader +                                              \
      FIELD_OFFSET( IMAGE_NT_HEADERS, OptionalHeader ) +                 \
      ((PIMAGE_NT_HEADERS)(ntheader))->FileHeader.SizeOfOptionalHeader   \
     ))
@@ -144,17 +144,17 @@ typedef struct _IMAGE_EXPORT_DIRECTORY {
 typedef struct _IMAGE_SECTION_HEADER {
     u8    Name[IMAGE_SIZEOF_SHORT_NAME];
     union {
-            ulong   PhysicalAddress;
-            ulong   VirtualSize;
+            u32   PhysicalAddress;
+            u32   VirtualSize;
     } Misc;
-    ulong   VirtualAddress;
-    ulong   SizeOfRawData;
-    ulong   PointerToRawData;
-    ulong   PointerToRelocations;
-    ulong   PointerToLinenumbers;
+    u32   VirtualAddress;
+    u32   SizeOfRawData;
+    u32   PointerToRawData;
+    u32   PointerToRelocations;
+    u32   PointerToLinenumbers;
     u16    NumberOfRelocations;
     u16    NumberOfLinenumbers;
-    ulong   Characteristics;
+    u32   Characteristics;
 } IMAGE_SECTION_HEADER, *PIMAGE_SECTION_HEADER;
 
 #define IMAGE_SIZEOF_SECTION_HEADER          40

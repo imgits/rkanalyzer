@@ -404,7 +404,7 @@ void vt_read_debug_reg (enum debug_reg reg, ulong *val)
 
 	switch (reg) {
 	case DEBUG_REG_DR0:
-		if(current->u.vt.vr.rk_tf.dr_shadow_flag & DR_SHADOW_DR0){
+		if((current->u.vt.vr.rk_tf.dr_shadow_flag & DR_SHADOW_DR0) && (rk_has_setup)){
 			*val = current->u.vt.vr.rk_tf.dr0_shadow;
 		}
 		else{
@@ -413,7 +413,7 @@ void vt_read_debug_reg (enum debug_reg reg, ulong *val)
 		}
 		break;
 	case DEBUG_REG_DR1:
-		if(current->u.vt.vr.rk_tf.dr_shadow_flag & DR_SHADOW_DR1){
+		if((current->u.vt.vr.rk_tf.dr_shadow_flag & DR_SHADOW_DR1) && (rk_has_setup)){
 			*val = current->u.vt.vr.rk_tf.dr1_shadow;
 		}
 		else{
@@ -422,7 +422,7 @@ void vt_read_debug_reg (enum debug_reg reg, ulong *val)
 		}
 		break;
 	case DEBUG_REG_DR2:
-		if(current->u.vt.vr.rk_tf.dr_shadow_flag & DR_SHADOW_DR2){
+		if((current->u.vt.vr.rk_tf.dr_shadow_flag & DR_SHADOW_DR2) && (rk_has_setup)){
 			*val = current->u.vt.vr.rk_tf.dr2_shadow;
 		}
 		else{
@@ -431,7 +431,7 @@ void vt_read_debug_reg (enum debug_reg reg, ulong *val)
 		}
 		break;
 	case DEBUG_REG_DR3:
-		if(current->u.vt.vr.rk_tf.dr_shadow_flag & DR_SHADOW_DR3){
+		if((current->u.vt.vr.rk_tf.dr_shadow_flag & DR_SHADOW_DR3) && (rk_has_setup)){
 			*val = current->u.vt.vr.rk_tf.dr3_shadow;
 		}
 		else{
@@ -440,7 +440,7 @@ void vt_read_debug_reg (enum debug_reg reg, ulong *val)
 		}
 		break;
 	case DEBUG_REG_DR6:
-		if(current->u.vt.vr.rk_tf.dr_shadow_flag & DR_SHADOW_DR6){
+		if((current->u.vt.vr.rk_tf.dr_shadow_flag & DR_SHADOW_DR6) && (rk_has_setup)){
 			*val = current->u.vt.vr.rk_tf.dr6_shadow;
 		}
 		else{
@@ -449,7 +449,7 @@ void vt_read_debug_reg (enum debug_reg reg, ulong *val)
 		}
 		break;
 	case DEBUG_REG_DR7:
-		if(current->u.vt.vr.rk_tf.dr_shadow_flag & DR_SHADOW_DR7){
+		if((current->u.vt.vr.rk_tf.dr_shadow_flag & DR_SHADOW_DR7) && (rk_has_setup)){
 			*val = current->u.vt.vr.rk_tf.dr7_shadow;
 		}
 		else{
@@ -465,7 +465,7 @@ void vt_write_debug_reg (enum debug_reg reg, ulong val)
 {
 	switch (reg) {
 	case DEBUG_REG_DR0:
-		if(current->u.vt.vr.rk_tf.dr_shadow_flag & DR_SHADOW_DR0){
+		if((current->u.vt.vr.rk_tf.dr_shadow_flag & DR_SHADOW_DR0) && (rk_has_setup)){
 			current->u.vt.vr.rk_tf.dr0_shadow = val;
 		}
 		else{
@@ -473,7 +473,7 @@ void vt_write_debug_reg (enum debug_reg reg, ulong val)
 		}
 		break;
 	case DEBUG_REG_DR1:
-		if(current->u.vt.vr.rk_tf.dr_shadow_flag & DR_SHADOW_DR1){
+		if((current->u.vt.vr.rk_tf.dr_shadow_flag & DR_SHADOW_DR1) && (rk_has_setup)){
 			current->u.vt.vr.rk_tf.dr1_shadow = val;
 		}
 		else{
@@ -481,7 +481,7 @@ void vt_write_debug_reg (enum debug_reg reg, ulong val)
 		}
 		break;
 	case DEBUG_REG_DR2:
-		if(current->u.vt.vr.rk_tf.dr_shadow_flag & DR_SHADOW_DR2){
+		if((current->u.vt.vr.rk_tf.dr_shadow_flag & DR_SHADOW_DR2) && (rk_has_setup)){
 			current->u.vt.vr.rk_tf.dr2_shadow = val;
 		}
 		else{
@@ -489,7 +489,7 @@ void vt_write_debug_reg (enum debug_reg reg, ulong val)
 		}
 		break;
 	case DEBUG_REG_DR3:
-		if(current->u.vt.vr.rk_tf.dr_shadow_flag & DR_SHADOW_DR3){
+		if((current->u.vt.vr.rk_tf.dr_shadow_flag & DR_SHADOW_DR3) && (rk_has_setup)){
 			current->u.vt.vr.rk_tf.dr3_shadow = val;
 		}
 		else{
@@ -497,7 +497,7 @@ void vt_write_debug_reg (enum debug_reg reg, ulong val)
 		}
 		break;
 	case DEBUG_REG_DR6:
-		if(current->u.vt.vr.rk_tf.dr_shadow_flag & DR_SHADOW_DR6){
+		if((current->u.vt.vr.rk_tf.dr_shadow_flag & DR_SHADOW_DR6) && (rk_has_setup)){
 			current->u.vt.vr.rk_tf.dr6_shadow = val;
 		}
 		else{
@@ -505,7 +505,7 @@ void vt_write_debug_reg (enum debug_reg reg, ulong val)
 		}
 		break;
 	case DEBUG_REG_DR7:
-		if(current->u.vt.vr.rk_tf.dr_shadow_flag & DR_SHADOW_DR7){
+		if((current->u.vt.vr.rk_tf.dr_shadow_flag & DR_SHADOW_DR7) && (rk_has_setup)){
 			current->u.vt.vr.rk_tf.dr7_shadow = val;
 		}
 		else{
