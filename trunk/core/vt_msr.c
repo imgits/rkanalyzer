@@ -153,6 +153,9 @@ vt_read_msr (u32 msrindex, u64 *msrdata)
 	u64 data;
 	bool r = false;
 	static const u64 mask = MSR_IA32_EFER_LME_BIT | MSR_IA32_EFER_LMA_BIT;
+#ifdef RK_ANALYZER
+	static const u64 mask_with_nx = mask | MSR_IA32_EFER_NXE_BIT;
+#endif
 
 	switch (msrindex) {
 	case MSR_IA32_SYSENTER_CS:
@@ -171,11 +174,22 @@ vt_read_msr (u32 msrindex, u64 *msrdata)
 		r = vt_read_guest_msr (current->u.vt.msr.efer, &data);
 		if (r)
 			break;
+#ifdef RK_ANALYZER
+		if (current->u.vt.vr.rk_tf.nx_enable)
+			data &= ~mask_with_nx;
+		else
+			data &= ~mask;
+#else
 		data &= ~mask;
+#endif
 		if (current->u.vt.lme)
 			data |= MSR_IA32_EFER_LME_BIT;
 		if (current->u.vt.lma)
 			data |= MSR_IA32_EFER_LMA_BIT;
+#ifdef RK_ANALYZER
+		if ((current->u.vt.vr.rk_tf.nx_enable) && (current->u.vt.vr.rk_tf.guest_msr_efer_nxe))
+			data |= MSR_IA32_EFER_NXE_BIT;
+#endif
 		*msrdata = data;
 		break;
 	case MSR_IA32_STAR:
@@ -213,6 +227,9 @@ vt_write_msr (u32 msrindex, u64 msrdata)
 	u64 data;
 	bool r = false;
 	static const u64 mask = MSR_IA32_EFER_LME_BIT | MSR_IA32_EFER_LMA_BIT;
+#ifdef RK_ANALYZER
+	static const u64 mask_with_nx = mask | MSR_IA32_EFER_NXE_BIT;
+#endif
 
 	switch (msrindex) {
 	case MSR_IA32_SYSENTER_CS:
@@ -229,8 +246,19 @@ vt_write_msr (u32 msrindex, u64 msrdata)
 		if (r)
 			break;
 		current->u.vt.lme = !!(msrdata & MSR_IA32_EFER_LME_BIT);
+#ifdef RK_ANALYZER
+		if (current->u.vt.vr.rk_tf.nx_enable){
+			current->u.vt.vr.rk_tf.guest_msr_efer_nxe = !!(msrdata & MSR_IA32_EFER_NXE_BIT);
+			data &= mask_with_nx;
+			data |= msrdata & ~mask_with_nx;
+		}else{
+			data &= mask;
+			data |= msrdata & ~mask;
+		}
+#else
 		data &= mask;
 		data |= msrdata & ~mask;
+#endif
 		/* FIXME: Reserved bits should be checked here. */
 		r = vt_write_guest_msr (current->u.vt.msr.efer, data);
 		vt_msr_update_lma ();

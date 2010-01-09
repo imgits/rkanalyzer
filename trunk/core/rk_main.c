@@ -5,6 +5,7 @@
 
 
 #include "rk_main.h"
+#include "rk_nx.h"
 #include "list.h"
 #include "mm.h"
 #include "cpu_mmu.h"
@@ -19,24 +20,61 @@
 
 //#define NO_WR_SET
 
-debugreg_dispatch dr_dispatcher;
-bool has_setup;
+volatile struct os_dependent os_dep;
+volatile bool rk_has_setup;
+volatile bool is_debug_print;
 static spinlock_t mmarea_lock;
 static spinlock_t setup_lock;
 static LIST1_DEFINE_HEAD (struct mm_protected_varange, list_varanges);
 static LIST1_DEFINE_HEAD (struct mm_protected_page, list_pages);
 static LIST1_DEFINE_HEAD (struct mm_protected_page_samegfns, list_delay_release_pages);
 
-bool rk_try_setup_global (void)
+void toogle_debug_print(void)
+{
+	is_debug_print = (!(is_debug_print));
+	if(is_debug_print){
+		printf("[RKAnalyzer][DbgPrint ON]\n");
+	}
+	else{
+		printf("[RKAnalyzer][DbgPrint OFF]\n");
+	}
+}
+
+bool is_debug(void)
+{
+	return is_debug_print;
+}
+
+int dbgprint(const char *format, ...)
+{
+	va_list ap;
+	int r = 0;
+	
+	if(is_debug_print){
+		va_start(ap, format);
+		r = printf(format, ap);
+		va_end(ap);
+	}
+	
+	return r;
+}
+
+bool rk_try_setup_global (os_dependent_setter os_dep_setter)
 {
 	spinlock_lock(&setup_lock);
-	if(has_setup){
+	if(rk_has_setup){
 		spinlock_unlock(&setup_lock);
 		return false;
 	}
 	
-	has_setup = true;
-	dr_dispatcher = NULL;
+	rk_has_setup = true;
+	os_dep.dr_dispatcher = NULL;
+	os_dep.va_kernel_start = MAX_VA;
+	os_dep.unknown_code_check_dispatcher = NULL;
+	
+	//NB: Set OS Dependent values before doing other module(such as NX) setup
+	os_dep_setter();
+	rk_nx_try_setup_global();
 	spinlock_unlock(&setup_lock);
 	return true;
 }
@@ -52,6 +90,7 @@ bool rk_try_setup_per_vcpu (void)
 	}
 	
 	p_rk_tf->initialized = true;
+	rk_nx_try_setup_per_vcpu();
 	spinlock_unlock(&(p_rk_tf->init_lock));
 	return true;
 }
@@ -59,7 +98,8 @@ bool rk_try_setup_per_vcpu (void)
 static void
 rk_init_global (void)
 {
-	has_setup = false;
+	rk_has_setup = false;
+	is_debug_print = true;
 	spinlock_init(&mmarea_lock);
 	spinlock_init(&setup_lock);
 	LIST1_HEAD_INIT (list_pages);
@@ -73,6 +113,8 @@ rk_init_vcpu (void)
 {
 	struct rk_tf_state *rk_tf = current->vmctl.get_struct_rk_tf();
 	rk_tf->initialized = false;
+	rk_tf->disable_protect = false;
+	rk_tf->nx_enable = false;
 	spinlock_init(&(rk_tf->init_lock));
 }
 
@@ -179,12 +221,13 @@ static void rk_scan_for_pages_and_add_by_gfns(u64 gfns, struct mm_protected_page
 				}
 				pte = pte & (~PTE_RW_BIT);
 #ifndef NO_WR_SET
-				pmap_write (&m, pte, 0xFFF);
+				if(!(current->vmctl.get_struct_rk_tf()->disable_protect))
+					pmap_write (&m, pte, 0xFFF);
 #endif
 			}
 		}
 
-		currentaddr = currentaddr | ~((0xFFFFFFFF >> PAGESIZE_SHIFT) << PAGESIZE_SHIFT);
+		currentaddr = currentaddr | ~((MAX_VA >> PAGESIZE_SHIFT) << PAGESIZE_SHIFT);
 		if(currentaddr == 0xFFFFFFFF)
 			break;
 
@@ -299,7 +342,8 @@ mmprotect_callback callback_func, ulong *properties, int properties_count)
 					}
 					pte = pte & (~PTE_RW_BIT);
 #ifndef NO_WR_SET
-					pmap_write (&m, pte, 0xFFF);
+					if(!(current->vmctl.get_struct_rk_tf()->disable_protect))
+						pmap_write (&m, pte, 0xFFF);
 #endif
 
 					page->gfns = (pte & PTE_ADDR_MASK64) >> PAGESIZE_SHIFT;
@@ -316,14 +360,15 @@ mmprotect_callback callback_func, ulong *properties, int properties_count)
 						page->p_page_samegfns_list->refcount = 1;
 						page->p_page_samegfns_list->gfns = page->gfns;
 						LIST1_HEAD_INIT(page->p_page_samegfns_list->pages_of_samegfns);
-						//TOO SLOW FOR GREAT NUMBER OF PAGES.IMPROVE IT.
-						//rk_scan_for_pages_and_add_by_gfns(page->p_page_samegfns_list->gfns, page->p_page_samegfns_list);
+						
+						//In fact, there is no need to scan for those "potential mapping" pages here
+						//We can just flush the entire SPT, so when those pages are mapped, it will cause page fault and caught by us later!
 					}
 				}
 				else {
 					page->never_paged_in_yet = true;
 					page->page_wr_setbysystem = true;
-					page->gfns = 0xFFFFFFFFUL;
+					page->gfns = MAX_VA;
 					page->p_page_samegfns_list = NULL;
 				}
 			}
@@ -337,7 +382,7 @@ mmprotect_callback callback_func, ulong *properties, int properties_count)
 			}
 		}
 
-		currentendaddr = currentaddr | ~((0xFFFFFFFF >> PAGESIZE_SHIFT) << PAGESIZE_SHIFT);
+		currentendaddr = currentaddr | ~((MAX_VA >> PAGESIZE_SHIFT) << PAGESIZE_SHIFT);
 		nextaddr = currentendaddr + 1;
 		if(currentendaddr > endaddr){
 			currentendaddr = endaddr;
@@ -537,7 +582,8 @@ static void update_RW_for_page(struct mm_protected_page *page)
 		}
 		pte = pte & (~PTE_RW_BIT);
 #ifndef NO_WR_SET
-		pmap_write (&m, pte, 0xFFF);
+		if(!(current->vmctl.get_struct_rk_tf()->disable_protect))
+			pmap_write (&m, pte, 0xFFF);
 #endif
 	}
 	else {
@@ -562,7 +608,8 @@ static void update_RW_for_page_samegfns(struct mm_protected_page_samegfns *page_
 		}
 		pte = pte & (~PTE_RW_BIT);
 #ifndef NO_WR_SET
-		pmap_write (&m, pte, 0xFFF);
+		if(!(current->vmctl.get_struct_rk_tf()->disable_protect))
+			pmap_write (&m, pte, 0xFFF);
 #endif
 	}
 	else {
@@ -760,7 +807,8 @@ void rk_manipulate_mmarea_if_need(virt_t newvirtaddr, u64 gfns){
 					}
 					pte = pte & (~PTE_RW_BIT);
 #ifndef NO_WR_SET
-					pmap_write (&m, pte, 0xFFF);
+					if(!(current->vmctl.get_struct_rk_tf()->disable_protect))
+						pmap_write (&m, pte, 0xFFF);
 #endif
 				}
 				else
@@ -819,9 +867,9 @@ static enum rk_result rk_callfunc_if_addr_protected_core(virt_t virtaddr, bool d
 				if(page_samegfns->pfn == virtaddr >> PAGESIZE_SHIFT){
 					LIST2_FOREACH(page->areas_in_page, forpage, mmarea){
 						newstartaddr = (page_samegfns->pfn << (PAGESIZE_SHIFT)) | 
-										(mmarea->startaddr & ~((0xFFFFFFFF >> PAGESIZE_SHIFT) << PAGESIZE_SHIFT));
+										(mmarea->startaddr & ~((MAX_VA >> PAGESIZE_SHIFT) << PAGESIZE_SHIFT));
 						newendaddr = (page_samegfns->pfn << (PAGESIZE_SHIFT)) | 
-										(mmarea->endaddr & ~((0xFFFFFFFF >> PAGESIZE_SHIFT) << PAGESIZE_SHIFT));          
+										(mmarea->endaddr & ~((MAX_VA >> PAGESIZE_SHIFT) << PAGESIZE_SHIFT));          
 						if((virtaddr >= newstartaddr) && (virtaddr <= newendaddr)){
 							if(mmarea->varange->callback_func(mmarea, virtaddr, display)){
 								found = true;

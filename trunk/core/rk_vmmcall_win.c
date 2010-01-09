@@ -15,12 +15,13 @@
 #include "vmmcall.h"
 #include "list.h"
 #include "rk_main.h"
+#include "rk_nx.h"
 #include "rk_struct_win.h"
 #include "cpu.h"
 
 #ifdef RK_ANALYZER
 
-#define FUNCTION_NAME_MAXLEN 100
+#define NAME_MAXLEN 256
 #define MAX_OBJTYPENAME_LENGTH 100
 
 #define PROPERTY_CALLERADDR 0
@@ -32,42 +33,28 @@
 
 #define CALL_LIST_WARN_COUNT	20
 
-struct object_type{
-	char name[MAX_OBJTYPENAME_LENGTH + 1];
-	virt_t addr;
-};
-
-struct guest_win_kernel_objects{
-	virt_t pSDT;
-	virt_t pSSDT;
-	unsigned long int NumberOfService;
-	virt_t pIDT;
-	virt_t pKernelCodeStart;
-	virt_t pKernelCodeEnd;
-	virt_t pNTDLLMaped;
-	unsigned long int ObjectTypeCount;
-	struct object_type *pObjectTypeArray;
-};
-
-struct guest_win_kernel_export_function{
-	LIST1_DEFINE (struct guest_win_kernel_export_function);
-	virt_t entrypoint;
-	char name[FUNCTION_NAME_MAXLEN];
-};
-
 struct guest_win_pe_section{
 	LIST1_DEFINE (struct guest_win_pe_section);
 	virt_t va;
 	ulong size;
 	ulong characteristics;
-	char name[FUNCTION_NAME_MAXLEN];
+	char name[NAME_MAXLEN];
 };
 
-struct guest_win_obcreateobject_call_info{
-	ulong retaddr;
-	ulong param_objbodysize;
-	ulong param_ppobj;
-	ulong thread_id;
+struct guest_win_pe_symbol{
+	LIST1_DEFINE (struct guest_win_pe_symbol);
+	ulong va;
+	char name[NAME_MAXLEN];
+};
+
+struct guest_win_pe{
+	LIST1_DEFINE (struct guest_win_pe);
+	LIST1_DEFINE_HEAD (struct guest_win_pe_section, list_sections);
+	LIST1_DEFINE_HEAD (struct guest_win_pe_symbol, list_data_symbols);
+	LIST1_DEFINE_HEAD (struct guest_win_pe_symbol, list_code_symbols);
+	ulong imagebase;
+	ulong size;
+	char name[NAME_MAXLEN];
 };
 
 /*
@@ -88,17 +75,24 @@ struct guest_win_exallocatepoolwithtag_call_info_stack{
 	ulong kthread_addr;
 };
 
-struct guest_win_kernel_objects win_ko;
-static ulong kernelbase;
+static volatile ulong kernelbase;
+static struct guest_win_pe kernel_pe;
 static spinlock_t call_info_access_lock;
-static ulong call_info_list_watchdog;
-static ulong call_info_list_current_count;
+static volatile ulong call_info_list_watchdog;
+static volatile ulong call_info_list_current_count;
 static spinlock_t call_info_watchdog_lock;
 
-static LIST1_DEFINE_HEAD (struct guest_win_kernel_export_function, list_win_kernel_export_functions);
-static LIST1_DEFINE_HEAD (struct guest_win_kernel_export_function, list_win_kernel_ssdt_entries);
-static LIST1_DEFINE_HEAD (struct guest_win_pe_section, list_win_pe_sections);
+static LIST1_DEFINE_HEAD (struct guest_win_pe, list_legal_pes);
+static LIST1_DEFINE_HEAD (struct guest_win_pe, list_illegal_pes);
 static LIST1_DEFINE_HEAD (struct guest_win_exallocatepoolwithtag_call_info_stack, list_call_info);	//call info stack for ExAllocatePoolWithTag in Windows
+
+static inline void init_pe_struct(struct guest_win_pe *p_pe)
+{
+	LIST1_HEAD_INIT(p_pe->list_sections);
+	LIST1_HEAD_INIT(p_pe->list_data_symbols);
+	LIST1_HEAD_INIT(p_pe->list_code_symbols);
+	memset(p_pe->name, 0, sizeof(char) * NAME_MAXLEN);
+}
 
 static void rk_win_call_info_check_watchdog(bool increment)
 {
@@ -132,11 +126,11 @@ static void rk_win_call_info_check_watchdog(bool increment)
 
 static bool rk_win_getentryaddrbyname(const char *name, virt_t *pEntrypoint)
 {
-	struct guest_win_kernel_export_function *func;
+	struct guest_win_pe_symbol *func;
 
-	LIST1_FOREACH (list_win_kernel_export_functions, func) {
+	LIST1_FOREACH (kernel_pe.list_code_symbols, func) {
 		if(strcmp(func->name, (char *)name) == 0){
-			*pEntrypoint = func->entrypoint;
+			*pEntrypoint = func->va;
 			return true;
 		}
 	}
@@ -148,11 +142,62 @@ static bool rk_win_is_system_code(virt_t inst_addr)
 {
 	struct guest_win_pe_section *section;
 
-	LIST1_FOREACH (list_win_pe_sections, section) {
+	LIST1_FOREACH (kernel_pe.list_sections, section) {
 		if(((section->characteristics & IMAGE_SCN_MEM_EXECUTE) != 0) && 
 			(inst_addr >= section->va) && (inst_addr <= (section->va + section->size - 1)))
 		{
 			return true;
+		}
+	}
+
+	return false;
+}
+
+static bool rk_win_is_code_in_pe(struct guest_win_pe *p_pe, virt_t inst_addr)
+{
+	struct guest_win_pe_section *section;
+
+	LIST1_FOREACH (p_pe->list_sections, section) {
+		if(((section->characteristics & IMAGE_SCN_MEM_EXECUTE) != 0) && 
+			(inst_addr >= section->va) && (inst_addr <= (section->va + section->size - 1)))
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
+static bool rk_win_is_code_in_legal_pe_list(virt_t inst_addr)
+{
+	struct guest_win_pe_section *section;
+	struct guest_win_pe *pe;
+
+	LIST1_FOREACH (list_legal_pes, pe){
+		LIST1_FOREACH (pe->list_sections, section) {
+			if(((section->characteristics & IMAGE_SCN_MEM_EXECUTE) != 0) && 
+				(inst_addr >= section->va) && (inst_addr <= (section->va + section->size - 1)))
+			{
+				return true;
+			}
+		}
+	}
+
+	return false;
+}
+
+static bool rk_win_is_code_in_illegal_pe_list(virt_t inst_addr)
+{
+	struct guest_win_pe_section *section;
+	struct guest_win_pe *pe;
+
+	LIST1_FOREACH (list_illegal_pes, pe){
+		LIST1_FOREACH (pe->list_sections, section) {
+			if(((section->characteristics & IMAGE_SCN_MEM_EXECUTE) != 0) && 
+				(inst_addr >= section->va) && (inst_addr <= (section->va + section->size - 1)))
+			{
+				return true;
+			}
 		}
 	}
 
@@ -297,34 +342,6 @@ static void rk_win_remove_dr1()
 	//printf("Debug Register 1 Removed.\n");
 }
 
-static bool mmprotect_callback_win_ssdt(struct mm_protected_area *mmarea, virt_t addr, bool display)
-{
-	struct guest_win_kernel_export_function *func;
-	virt_t equivaladdr;
-
-	if(display)
-	{
-		printf("[RKAnalyzer][SSDT]Access Violation at 0x%lX\n", addr);
-
-		if((addr >> PAGESIZE_SHIFT) != (mmarea->startaddr >> PAGESIZE_SHIFT)){
-			equivaladdr = ((mmarea->startaddr >> PAGESIZE_SHIFT) << (PAGESIZE_SHIFT)) | 
-							(addr & ~((0xFFFFFFFF >> PAGESIZE_SHIFT) << PAGESIZE_SHIFT));
-		}
-		else{
-			equivaladdr = addr;
-		}
-
-		LIST1_FOREACH (list_win_kernel_ssdt_entries, func) {
-			if((equivaladdr >= func->entrypoint) && ((equivaladdr - func->entrypoint) <= 3)){
-				printf("[RKAnalyzer][SSDT]Access Violation at %s\n", func->name);	
-				break;
-			}
-		}
-	}
-
-	return true;
-}
-
 static bool mmprotect_callback_win_pereadonly(struct mm_protected_area *mmarea, virt_t addr, bool display)
 {
 	if(display)
@@ -345,9 +362,9 @@ static bool mmprotect_callback_win_kernelheap(struct mm_protected_area *mmarea, 
 		
 		if(!(rk_win_is_system_code(ip)))
 		{
-			printf("[RKAnalyzer][KernelHeap]Access Violation at 0x%lX, eip = 0x%lX\n", addr, ip);
+			dbgprint("[RKAnalyzer][KernelHeap]Access Violation at 0x%lX, eip = 0x%lX\n", addr, ip);
 			if(mmarea->varange->properties != NULL){
-				printf("[RKAnalyzer][KernelHeap]Heap Info: Allocer = 0x%lX, Type = 0x%lX, Tag = 0x%lX, Size = 0x%lX\n", 
+				dbgprint("[RKAnalyzer][KernelHeap]Heap Info: Allocer = 0x%lX, Type = 0x%lX, Tag = 0x%lX, Size = 0x%lX\n", 
 					mmarea->varange->properties[PROPERTY_CALLERADDR], mmarea->varange->properties[PROPERTY_POOLTYPE], 
 					mmarea->varange->properties[PROPERTY_TAG], mmarea->varange->properties[PROPERTY_ALLOCSIZE]);
 			}
@@ -356,7 +373,17 @@ static bool mmprotect_callback_win_kernelheap(struct mm_protected_area *mmarea, 
 		
 	}
 	
-	return false;
+	if(is_debug()){
+		return true;
+	}
+	else{
+		return false;
+	}
+}
+
+static bool mmcode_callback_general (struct mm_code_varange* mmvarange, virt_t addr, bool display)
+{
+	return true;
 }
 
 static void rk_win_dr_dispatch(int debug_num)
@@ -365,7 +392,6 @@ static void rk_win_dr_dispatch(int debug_num)
 //	struct guest_win_obcreateobject_call_info call_info;
 	struct guest_win_exallocatepoolwithtag_call_info call_info;
 	struct guest_win_exallocatepoolwithtag_call_info *exalloc_call_info;
-	struct mm_protected_area* mm_area;
 	ulong properties[10];
 	struct rk_tf_state *p_rk_tf = current->vmctl.get_struct_rk_tf();
 
@@ -447,9 +473,9 @@ static void rk_win_dr_dispatch(int debug_num)
 			exalloc_call_info->retval = eax;
 			
 			if((exalloc_call_info->retval != 0) && (exalloc_call_info->param_tag == (0x636f7250 | 0x80000000))){
-				printf("[CPU %d]Call Info: Caller=0x%lx, PoolType=0x%lx, NumberOfBytes=0x%lx, Tag=0x%lX, RetVal=0x%lX\n", get_cpu_id(), 
-				exalloc_call_info->retaddr, exalloc_call_info->param_pooltype, exalloc_call_info->param_numberofbytes, 
-				exalloc_call_info->param_tag, exalloc_call_info->retval);
+				//printf("[CPU %d]Call Info: Caller=0x%lx, PoolType=0x%lx, NumberOfBytes=0x%lx, Tag=0x%lX, RetVal=0x%lX\n", get_cpu_id(), 
+				//exalloc_call_info->retaddr, exalloc_call_info->param_pooltype, exalloc_call_info->param_numberofbytes, 
+				//exalloc_call_info->param_tag, exalloc_call_info->retval);
 
 				//Add it to protection list
 				properties[PROPERTY_CALLERADDR] = exalloc_call_info->retaddr;
@@ -515,7 +541,9 @@ static void rk_win_dr_dispatch(int debug_num)
 	p_rk_tf->should_set_rf_befor_entry = true;
 }
 
-static void rk_win_readfromguest()
+//scankernel = true -> scan kernel, ignore, hint_addr
+//scankernel = false -> scan for PE, from hint_addr to lower space
+static bool rk_win_readfromguest(struct guest_win_pe *p_pe, bool scankernel, virt_t hint_addr)
 {
 	//Parse the PE Section
 	//Dump all exported functions.
@@ -530,48 +558,77 @@ static void rk_win_readfromguest()
 	ulong addr_2 = 0;
 	int namelen = 0;
 	IMAGE_EXPORT_DIRECTORY Export;
-	char strbuf[FUNCTION_NAME_MAXLEN];
+	char strbuf[NAME_MAXLEN];
 	unsigned char* buf_2 = (unsigned char*)&Export;
 	bool succeed = false;
-	struct guest_win_kernel_export_function *function;
+	struct guest_win_pe_symbol *function;
 	struct guest_win_pe_section *section;
 	ulong addr_section_header = 0;
 	u16 numberOfSections = 0;
 	IMAGE_SECTION_HEADER section_header;
 	unsigned char* p_section_header = (unsigned char*)&section_header;
 	u8 sectionName[IMAGE_SIZEOF_SHORT_NAME + 1];
+	
+	if(p_pe == NULL)
+	{
+		return false;
+	}
 
 	//Scan for Ntoskrnl base
-	pebase = 0x80000000;
-	while(pebase < 0xa0000000){
-		if(read_linearaddr_l(pebase, &buf) == VMMERR_SUCCESS){
-			if(buf == 0x00905A4D){
-				//Found 'MZ'
-				//Test if the ImageSize is bigger than 0x150000
-				addr = pebase + rk_struct_win_offset(IMAGE_DOS_HEADER, e_lfanew);
-				if(read_linearaddr_l(addr, &buf) == VMMERR_SUCCESS){
-					addr = pebase + buf + rk_struct_win_offset(IMAGE_NT_HEADERS, 
-						OptionalHeader.SizeOfImage);
+	if(scankernel){
+		pebase = 0x80000000;
+		while(pebase < 0xa0000000){
+			if(read_linearaddr_l(pebase, &buf) == VMMERR_SUCCESS){
+				if(buf == 0x00905A4D){
+					//Found 'MZ'
+					//Test if the ImageSize is bigger than 0x150000
+					addr = pebase + rk_struct_win_offset(IMAGE_DOS_HEADER, e_lfanew);
 					if(read_linearaddr_l(addr, &buf) == VMMERR_SUCCESS){
-						if(buf >= 0x150000){
-							break;
+						addr = pebase + buf + rk_struct_win_offset(IMAGE_NT_HEADERS, 
+							OptionalHeader.SizeOfImage);
+						if(read_linearaddr_l(addr, &buf) == VMMERR_SUCCESS){
+							if(buf >= 0x150000){
+								break;
+							}
 						}
 					}
 				}
 			}
+			pebase = pebase >> PAGESIZE_SHIFT;
+			pebase ++;
+			pebase = pebase << PAGESIZE_SHIFT;
 		}
-		pebase = pebase >> PAGESIZE_SHIFT;
-		pebase ++;
-		pebase = pebase << PAGESIZE_SHIFT;
+
+		if(pebase >= 0xa0000000){
+			goto init_failed;
+		}
+		step ++;
+	}
+	else{
+		pebase = (hint_addr >> PAGESIZE_SHIFT) << PAGESIZE_SHIFT;	//PE Always load at page aligned addr
+		while(pebase >= 0x80000000){
+			if(read_linearaddr_l(pebase, &buf) == VMMERR_SUCCESS){
+				if(buf == 0x00905A4D){
+					//Found 'MZ'
+					//TODO: Test 'PE' Flag
+					break;
+				}
+			}
+			pebase = pebase >> PAGESIZE_SHIFT;
+			pebase --;
+			pebase = pebase << PAGESIZE_SHIFT;
+		}
+
+		if(pebase < 0x80000000){
+			goto init_failed;
+		}
+		step ++;
 	}
 
-	if(pebase >= 0xa0000000){
-		goto init_failed;
+	if(scankernel)
+	{
+		kernelbase = pebase;
 	}
-	step ++;
-
-	printf("KernelBase = %lX\n", pebase);
-	kernelbase = pebase;
 
 	//buf = pNTHeader
 	addr = pebase + rk_struct_win_offset(IMAGE_DOS_HEADER, e_lfanew);
@@ -581,42 +638,7 @@ static void rk_win_readfromguest()
 	buf += pebase;
 	pNTHeader = buf;
 	step ++;
-
-	printf("NtHeader = %lX\n", buf);
-		
-	//buf = pExportDirectory
-	addr = buf + rk_struct_win_offset(IMAGE_NT_HEADERS, 
-			OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress);
-	err = read_linearaddr_l(addr, &buf);
-	if (err != VMMERR_SUCCESS)
-		goto init_failed;
-	buf += pebase;	
-	step ++;
-
-	printf("pExportDirectory = %lX\n", buf);
 	
-	for (i = 0; i < sizeof(IMAGE_EXPORT_DIRECTORY); i++) {
-		if (read_linearaddr_b (buf + i, buf_2 + i)
-		    != VMMERR_SUCCESS)
-			goto init_failed;
-	}
-	step ++;
-
-	printf("Export.Name = %lX\n", Export.Name);
-
-	//name
-	buf = Export.Name + pebase;
-	for (i = 0; i < sizeof(strbuf); i++) {
-		if (read_linearaddr_b (buf + i, strbuf + i)
-		    != VMMERR_SUCCESS)
-			goto init_failed;
-		if(strbuf[i] == 0)
-			break;
-	}
-	printf("FileName: %s\n", strbuf);
-	printf("Number of Functions: %ld\n", Export.NumberOfFunctions);
-	printf("Number of Names: %ld\n",Export.NumberOfNames);
-
 	//Sections
 	//numberofSections
 	addr = pNTHeader + rk_struct_win_offset(IMAGE_NT_HEADERS, 
@@ -642,234 +664,133 @@ static void rk_win_readfromguest()
 		addr_section_header += sizeof(IMAGE_SECTION_HEADER);
 		memcpy(sectionName, section_header.Name, sizeof(u8) * IMAGE_SIZEOF_SHORT_NAME);
 		sectionName[IMAGE_SIZEOF_SHORT_NAME] = 0;
-		printf("Section Name = %s, VA = 0x%lX, SIZE = %ld bytes, Flags = 0x%lX\n", sectionName, 
-			section_header.VirtualAddress, section_header.SizeOfRawData, section_header.Characteristics);
+		//printf("Section Name = %s, VA = 0x%X, SIZE = %d bytes, Flags = 0x%X\n", sectionName, 
+		//	section_header.VirtualAddress, section_header.SizeOfRawData, section_header.Characteristics);
 
 		section = alloc(sizeof(struct guest_win_pe_section));
 		section->va = pebase + section_header.VirtualAddress;
 		section->size = section_header.SizeOfRawData;
-		namelen = (strlen(strbuf) > (FUNCTION_NAME_MAXLEN - IMAGE_SIZEOF_SHORT_NAME - 2) ?
-			  (FUNCTION_NAME_MAXLEN - IMAGE_SIZEOF_SHORT_NAME - 2) :strlen(strbuf));
-		memcpy(section->name, strbuf, sizeof(char) * namelen);
-		section->name[namelen] = ':';
-		memcpy((section->name + namelen + 1), sectionName, sizeof(char) * (IMAGE_SIZEOF_SHORT_NAME + 1));
-		section->name[namelen + IMAGE_SIZEOF_SHORT_NAME + 1] = 0;		//NULL Terminate It
+		memcpy(section->name, sectionName, sizeof(u8) * IMAGE_SIZEOF_SHORT_NAME);
+		section->name[IMAGE_SIZEOF_SHORT_NAME] = 0;
 		section->characteristics = section_header.Characteristics;
 
-		LIST1_ADD (list_win_pe_sections, section);
+		LIST1_ADD (p_pe->list_sections, section);
 	}
 	step ++;
-
-	//Dump the functions
-	//FIXME:各种越界问题
-	for(i = 0; i < Export.NumberOfNames; i++){
-
-		succeed = true;
-
-		//Function Ordinals
-		addr = pebase + Export.AddressOfNameOrdinals + i * sizeof(u16);
-		if(read_linearaddr_w(addr, &shortbuf) != VMMERR_SUCCESS){
-			continue;
-		}
-
-		//Function Entry Point
-		addr = pebase + Export.AddressOfFunctions + (shortbuf + Export.Base - 1) * sizeof(ulong);
-		if(read_linearaddr_l(addr, &buf) != VMMERR_SUCCESS){
-			continue;
-		}
-		buf += pebase;
-
-		//Function Name
-		addr = pebase + Export.AddressOfNames + i * sizeof(ulong);
-		if(read_linearaddr_l(addr, &addr_2) != VMMERR_SUCCESS){
-			continue;
-		}
-		addr = pebase + addr_2;
-		for (j = 0; j < sizeof(strbuf); j++) {
-			if (read_linearaddr_b (addr + j, strbuf + j)
-		    		!= VMMERR_SUCCESS){
-				succeed = false;
-				break;
-			}
-			if(strbuf[j] == 0){
-				succeed = true;
-				break;
-			}
-		}
-
-		if(succeed){
-			function = alloc(sizeof(struct guest_win_kernel_export_function));
-			function->entrypoint = buf;
-
-			namelen = (strlen(strbuf) > (FUNCTION_NAME_MAXLEN - 1) ? (FUNCTION_NAME_MAXLEN - 1) : strlen(strbuf));
-			memcpy(function->name, strbuf, sizeof(char) * namelen);
-			function->name[namelen] = 0;			//NULL Terminate It
-
-			LIST1_ADD (list_win_kernel_export_functions, function);
-			//printf("Name : %s, Entry : 0x%lX\n", function->name, function->entrypoint);
-		}
+	
+	if((!scankernel) && (!rk_win_is_code_in_pe(p_pe, hint_addr)))
+	{
+		//It's a fake PE!!!!!!!
+		return false;
 	}
-
-
-	printf("[RKAnalyzer]Get Export Table Succeed...\n");
-
-	return;
-
-init_failed:
-	printf("[RKAnalyzer]Get Export Table Failed!, step = %d, buf= %lX, addr= %lX, err = %d\n", step, buf, addr, err);
-	return;
-}
-
-static void rk_win_fill_ssdt_entries(ulong pNTDLLMaped){
 	
-	//Try reading .edata section from ntdll.dll...dirty hack but no other method
-	//Parse the PE Section
-	//Dump all exported functions.
-	int i,j;
-	int step = 0;
-	int err = 0;
-	ulong pebase = pNTDLLMaped;
-	ulong buf = 0;
-	u16 shortbuf = 0;
-	ulong addr = 0;
-	ulong addr_2 = 0;
-	int namelen = 0;
-	IMAGE_EXPORT_DIRECTORY Export;
-	char strbuf[FUNCTION_NAME_MAXLEN];
-	unsigned char* buf_2 = (unsigned char*)&Export;
-	unsigned char cbuf;
-	bool succeed = false;
-	struct guest_win_kernel_export_function *ssdtentry;
+	printf("Hint = %lX, Base = %lX\n", hint_addr, pebase);
 	
-	printf("[RKAnalyzer]Get SSDT Table Indices From Export Table Of Ntdll.dll...\n");
-	printf("NTDLL Mapped Base = %lX\n", pebase);
-
-	//buf = pNTHeader
-	addr = pebase + rk_struct_win_offset(IMAGE_DOS_HEADER, e_lfanew);
-	err = read_linearaddr_l(addr, &buf);
-	if (err != VMMERR_SUCCESS)
-		goto init_failed;
-	buf += pebase;
-	step ++;
-
-	printf("NtHeader = %lX\n", buf);
-		
-	//buf = pExportDirectory
-	addr = buf + rk_struct_win_offset(IMAGE_NT_HEADERS, 
-			OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress);
-	err = read_linearaddr_l(addr, &buf);
-	if (err != VMMERR_SUCCESS)
-		goto init_failed;
-	buf += pebase;	
-	step ++;
-
-	printf("pExportDirectory = %lX\n", buf);
-	
-	for (i = 0; i < sizeof(IMAGE_EXPORT_DIRECTORY); i++) {
-		if (read_linearaddr_b (buf + i, buf_2 + i)
-		    != VMMERR_SUCCESS)
+	if(scankernel)
+	{
+		//buf = pExportDirectory
+		addr = buf + rk_struct_win_offset(IMAGE_NT_HEADERS, 
+				OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress);
+		err = read_linearaddr_l(addr, &buf);
+		if (err != VMMERR_SUCCESS)
 			goto init_failed;
-	}
-	step ++;
+		buf += pebase;	
+		step ++;
 
-	printf("Export.Name = %lX\n", Export.Name);
-
-	//name
-	buf = Export.Name + pebase;
-	for (i = 0; i < sizeof(strbuf); i++) {
-		if (read_linearaddr_b (buf + i, strbuf + i)
-		    != VMMERR_SUCCESS)
-			goto init_failed;
-		if(strbuf[i] == 0)
-			break;
-	}
-
-	step ++;
-
-	printf("FileName: %s\n", strbuf);
-	printf("Number of Functions: %ld\n", Export.NumberOfFunctions);
-	printf("Number of Names: %ld\n",Export.NumberOfNames);
-	printf("Base: %ld\n", Export.Base);
-
-	//Dump the functions
-	//FIXME:各种越界问题
-	for(i = 0; i < Export.NumberOfNames; i++){
-
-		succeed = true;
-
-		//Function Ordinals
-		addr = pebase + Export.AddressOfNameOrdinals + i * sizeof(u16);
-		if(read_linearaddr_w(addr, &shortbuf) != VMMERR_SUCCESS){
-			continue;
+		printf("pExportDirectory = %lX\n", buf);
+	
+		for (i = 0; i < sizeof(IMAGE_EXPORT_DIRECTORY); i++) {
+			if ((err = read_linearaddr_b (buf + i, buf_2 + i))
+				!= VMMERR_SUCCESS)
+				goto init_failed;
 		}
+		step ++;
 
-		//Function Entry Point
-		addr = pebase + Export.AddressOfFunctions + (shortbuf + Export.Base - 1) * sizeof(ulong);
-		if(read_linearaddr_l(addr, &buf) != VMMERR_SUCCESS){
-			continue;
-		}
-		buf += pebase;
+		printf("Export.Name = %X\n", Export.Name);
 
-		//Function Name
-		addr = pebase + Export.AddressOfNames + i * sizeof(ulong);
-		if(read_linearaddr_l(addr, &addr_2) != VMMERR_SUCCESS){
-			continue;
-		}
-		addr = pebase + addr_2;
-		for (j = 0; j < sizeof(strbuf); j++) {
-			if (read_linearaddr_b (addr + j, strbuf + j)
-		    		!= VMMERR_SUCCESS){
-				succeed = false;
+		//name
+		buf = Export.Name + pebase;
+		for (i = 0; i < sizeof(strbuf); i++) {
+			if ((err = read_linearaddr_b (buf + i, strbuf + i))
+				!= VMMERR_SUCCESS)
+				goto init_failed;
+			if(strbuf[i] == 0)
 				break;
-			}
-			if(strbuf[j] == 0){
-				succeed = true;
-				break;
-			}
 		}
+		printf("FileName: %s\n", strbuf);
+		printf("Number of Functions: %d\n", Export.NumberOfFunctions);
+		printf("Number of Names: %d\n",Export.NumberOfNames);
 
-		// printf("Name : %s, Entry : %lX\n", strbuf, buf);
+		//Dump the functions
+		//FIXME:各种越界问题
+		for(i = 0; i < Export.NumberOfNames; i++){
 
-		if(succeed){
-			if(strbuf[0] == 'Z' && strbuf[1] == 'w'){
-				if((err = read_linearaddr_b(buf, &cbuf)) == VMMERR_SUCCESS){
-					if(cbuf == 0xb8){
-						addr = buf + 1;
-						if(read_linearaddr_w(addr, &shortbuf) == VMMERR_SUCCESS){
-							//shortbuf = SSDT entry index
-							ssdtentry = alloc(sizeof(struct guest_win_kernel_export_function));
-							ssdtentry->entrypoint = win_ko.pSSDT + sizeof(ulong) * shortbuf;
+			succeed = true;
 
-							namelen = (strlen(strbuf) > (FUNCTION_NAME_MAXLEN-1) ? (FUNCTION_NAME_MAXLEN - 1) : strlen(strbuf));
-							strbuf[0] = 'N';
-							strbuf[1] = 't';
-							memcpy(ssdtentry->name, strbuf, sizeof(char) * namelen);
-							ssdtentry->name[namelen] = 0;			//NULL Terminate It
-			
-							LIST1_ADD (list_win_kernel_ssdt_entries, ssdtentry);
-							//printf("Index : %d, Name : %s, Entry : 0x%lX\n", shortbuf, strbuf, ssdtentry->entrypoint);
-						}
-					}
+			//Function Ordinals
+			addr = pebase + Export.AddressOfNameOrdinals + i * sizeof(u16);
+			if(read_linearaddr_w(addr, &shortbuf) != VMMERR_SUCCESS){
+				continue;
+			}
+
+			//Function Entry Point
+			addr = pebase + Export.AddressOfFunctions + (shortbuf + Export.Base - 1) * sizeof(u32);
+			if(read_linearaddr_l(addr, &buf) != VMMERR_SUCCESS){
+				continue;
+			}
+			buf += pebase;
+
+			//Function Name
+			addr = pebase + Export.AddressOfNames + i * sizeof(u32);
+			if(read_linearaddr_l(addr, &addr_2) != VMMERR_SUCCESS){
+				continue;
+			}
+			addr = pebase + addr_2;
+			for (j = 0; j < sizeof(strbuf); j++) {
+				if (read_linearaddr_b (addr + j, strbuf + j)
+						!= VMMERR_SUCCESS){
+					succeed = false;
+					break;
+				}
+				if(strbuf[j] == 0){
+					succeed = true;
+					break;
 				}
 			}
+
+			if(succeed){
+				function = alloc(sizeof(struct guest_win_pe_symbol));
+				function->va = buf;
+
+				namelen = (strlen(strbuf) > (NAME_MAXLEN - 1) ? (NAME_MAXLEN - 1) : strlen(strbuf));
+				memcpy(function->name, strbuf, sizeof(char) * namelen);
+				function->name[namelen] = 0;			//NULL Terminate It
+
+				LIST1_ADD (p_pe->list_code_symbols, function);
+				//printf("Name : %s, Entry : 0x%lX\n", function->name, function->entrypoint);
+			}
 		}
+
+
+		printf("[RKAnalyzer]Get Export Table Succeed...\n");
 	}
 
-
-	printf("[RKAnalyzer]Get SSDT Table Succeed...\n");
-
-	return;
+	return true;
 
 init_failed:
-	printf("[RKAnalyzer]Get SSDT Table Failed!, step = %d, buf= %lX, addr= %lX, err = %d\n", step, buf, addr, err);
-	return;
+	printf("[RKAnalyzer]Fail To Read PE!, step = %d, buf= %lX, addr= %lX, err = %d\n", step, buf, addr, err);
+	return false;
 }
 
-static void rk_win_protectpereadonlysections()
+static void rk_win_protectpereadonlysections(struct guest_win_pe *p_pe)
 {
 	struct guest_win_pe_section *section;
 
-	LIST1_FOREACH (list_win_pe_sections, section) {
+	if(p_pe == NULL){
+		return;
+	}
+
+	LIST1_FOREACH (p_pe->list_sections, section) {
 		if((section->characteristics & IMAGE_SCN_MEM_WRITE) == 0) {
 			printf("[RKAnalyzer]Protecting Readonly Section %s, VA = 0x%lX, VA_END = 0x%lX, SIZE = 0x%lX bytes\n", section->name, 
 			section->va, section->va + section->size - 1, section->size);
@@ -882,69 +803,65 @@ static void rk_win_protectpereadonlysections()
 	}
 }
 
-static void dump_ko(void)
+static enum rk_code_type rk_win_unknown_code_check_dispatch(virt_t addr)
 {
-	struct object_type *p_obj_type;
-	int i;
-
-	printf("[RKAnalyzer]Kernel Objects Dump:\n");
-	printf("[RKAnalyzer]pSDT = 0x%lX\n", win_ko.pSDT);
-	printf("[RKAnalyzer]pSSDT = 0x%lX\n", win_ko.pSSDT);
-	printf("[RKAnalyzer]NumberOfService = %ld\n", win_ko.NumberOfService);
-	printf("[RKAnalyzer]pIDT = 0x%lX\n", win_ko.pIDT);
-	printf("[RKAnalyzer]pKernelCodeStart = 0x%lX\n", win_ko.pKernelCodeStart);
-	printf("[RKAnalyzer]pKernelCodeEnd = 0x%lX\n", win_ko.pKernelCodeEnd);
-	printf("[RKAnalyzer]pNTDLLMaped = 0x%lX\n", win_ko.pNTDLLMaped);
-	printf("[RKAnalyzer]ObjectTypeCount = %ld\n", win_ko.ObjectTypeCount);
-	if((win_ko.pObjectTypeArray != NULL) && (win_ko.ObjectTypeCount > 0)){		
-		p_obj_type = win_ko.pObjectTypeArray;
-		for (i = 0; i < win_ko.ObjectTypeCount; i++) {
-			printf("[RKAnalyzer]ObjectType Addr = 0x%lX, Name = %s\n", p_obj_type->addr, p_obj_type->name);
-			p_obj_type++;
+	struct guest_win_pe_section *section;
+	
+	if(rk_win_is_code_in_legal_pe_list(addr)){
+		return RK_CODE_LEGAL;
+	}
+	
+	if(rk_win_is_code_in_illegal_pe_list(addr)){
+		return RK_CODE_ILLEGAL;
+	}
+	
+	struct guest_win_pe *new_pe = alloc(sizeof(struct guest_win_pe));
+	init_pe_struct(new_pe);
+	if(rk_win_readfromguest(new_pe, false, addr))
+	{
+		LIST1_ADD(list_illegal_pes, new_pe);
+		//rk_win_protectpereadonlysections(new_pe);
+		LIST1_FOREACH (new_pe->list_sections, section) {
+			if((section->characteristics & IMAGE_SCN_MEM_EXECUTE) != 0)
+				rk_add_code_mmvarange_nolock(false, section->va, section->va + section->size - 1, mmcode_callback_general);
 		}
 	}
+	else{
+		free(new_pe);
+		
+		//Add as a scratch
+		rk_add_code_mmvarange_nolock(false, addr, addr, mmcode_callback_general);
+	}
+	
+	return RK_CODE_ILLEGAL;
+}
+
+void rk_win_os_dep_setter(void)
+{	
+	os_dep.dr_dispatcher = rk_win_dr_dispatch;
+	os_dep.va_kernel_start = 0x80000000;
+	os_dep.unknown_code_check_dispatcher = rk_win_unknown_code_check_dispatch;
 }
 
 bool rk_win_init_global(virt_t base)
 {
 	int i;
-	struct object_type *obj_type_base;
-	unsigned char* buf = (unsigned char*)&win_ko;
+	struct guest_win_pe_section *section;
 	
-	if(!rk_try_setup_global()){
+	if(!rk_try_setup_global(rk_win_os_dep_setter)){
 		return true;
-	}
-
-	for (i = 0; i < sizeof(struct guest_win_kernel_objects); i++) {
-		if (read_linearaddr_b (base + i, buf + i)
-		    != VMMERR_SUCCESS)
-			goto init_failed;
-	}
-
-	if((win_ko.pObjectTypeArray != NULL) && (win_ko.ObjectTypeCount > 0)){		
-		obj_type_base = alloc(sizeof(struct object_type) * win_ko.ObjectTypeCount);
-		if(obj_type_base != NULL) {
-			for (i = 0; i < (sizeof(struct object_type) * win_ko.ObjectTypeCount); i++) {
-				if (read_linearaddr_b ((virt_t)(win_ko.pObjectTypeArray) + i, (unsigned char *)(obj_type_base) + i)
-				    != VMMERR_SUCCESS)
-					goto init_failed;
-			}
-		}
-		win_ko.pObjectTypeArray = obj_type_base;
 	}
 
 	printf("[RKAnalyzer]Setup Memory Areas To Protect...\n");
 
-	dr_dispatcher = rk_win_dr_dispatch;
 
-	dump_ko();
-	rk_win_readfromguest();
-	rk_win_fill_ssdt_entries(win_ko.pNTDLLMaped);
-	rk_win_protectpereadonlysections();
+	rk_win_readfromguest(&kernel_pe, true, 0);
+	LIST1_ADD(list_legal_pes, &kernel_pe);
+	rk_win_protectpereadonlysections(&kernel_pe);
 	
-	printf("[RKAnalyzer]Protecting SSDT Table...\n");
-	if(!rk_protect_mmarea(win_ko.pSSDT, win_ko.pSSDT + 4 * win_ko.NumberOfService - 1,"SSDT", mmprotect_callback_win_ssdt, NULL, 0)){
-		printf("[RKAnalyzer]Failed Adding MM Area...\n");
+	LIST1_FOREACH (kernel_pe.list_sections, section) {
+		if((section->characteristics & IMAGE_SCN_MEM_EXECUTE) != 0)
+			rk_add_code_mmvarange_nolock(true, section->va, section->va + section->size - 1, mmcode_callback_general);
 	}
 	
 	printf("[RKAnalyzer]Global Initialized on CPU %d.\n", get_cpu_id());
@@ -952,7 +869,6 @@ bool rk_win_init_global(virt_t base)
 	return true;
 	
 init_failed:
-	memset(&win_ko, 0, sizeof(struct guest_win_kernel_objects));
 	printf("[RKAnalyzer]Get Kernel Information Failed!\n");
 	return false;
 }
@@ -963,7 +879,7 @@ bool rk_win_init_per_vcpu(void)
 		return true;
 	}
 
-	rk_win_setdebugregister();
+	//rk_win_setdebugregister();
 	printf("[RKAnalyzer]CPU %d Initialized.\n", get_cpu_id());
 	
 	return true;
@@ -991,18 +907,17 @@ static void
 vmmcall_rk_win_init (void)
 {
 	vmmcall_register ("rk_win_init", rk_win_init);
-	memset(&win_ko, 0, sizeof(struct guest_win_kernel_objects));
 	kernelbase = 0;
 	call_info_list_watchdog = CALL_LIST_WARN_COUNT;
 	call_info_list_current_count = 0;
+	init_pe_struct(&kernel_pe);
 
-	LIST1_HEAD_INIT (list_win_kernel_export_functions);
-	LIST1_HEAD_INIT (list_win_kernel_ssdt_entries);
-	LIST1_HEAD_INIT (list_win_pe_sections);
+	LIST1_HEAD_INIT (list_legal_pes);
+	LIST1_HEAD_INIT (list_illegal_pes);
 	LIST1_HEAD_INIT (list_call_info);
 	spinlock_init(&call_info_access_lock);
 	spinlock_init(&call_info_watchdog_lock);
-	printf("Windows Kernel Symbol Lists Initialized...\n");
+	printf("RKAnalyzer Windows Module Initialized...\n");
 }
 
 INITFUNC ("vmmcal0", vmmcall_rk_win_init);

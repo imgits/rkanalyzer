@@ -35,6 +35,7 @@
 #include "io_iohook.h"
 #include "panic.h"
 #include "printf.h"
+#include "rk_main.h"
 
 #ifdef DEBUG_IO_MONITOR
 static void
@@ -126,6 +127,9 @@ kbdio_dbg_monitor (enum iotype type, u32 port, void *data)
 						LED_NUMLOCK_BIT;
 					setkbdled (led);
 					printf ("F12 pressed.\n");
+#ifdef RK_ANALYZER
+					toogle_debug_print();
+#endif
 				}
 #endif /* defined(F12MSG) */
 #if defined(F12UHCIFRAME)

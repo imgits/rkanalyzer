@@ -117,8 +117,6 @@ freeze (void)
 void
 guest_backtrace (void)
 {
-#ifdef __x86_64__
-#else
 	ulong rbp, caller, newrbp;
 	ulong start_rbp, rip;
 	current->vmctl.read_general_reg( GENERAL_REG_RBP, &start_rbp);
@@ -126,10 +124,12 @@ guest_backtrace (void)
 
 	printf ("guest backtrace:0x%lX", rip);
 	for (rbp = start_rbp; ; rbp = newrbp) {
+		newrbp = 0;
 		if (read_linearaddr_l (rbp, &newrbp) != VMMERR_SUCCESS){
 			printf("error");
 			break;
 		}
+		caller = 0;
 		if (read_linearaddr_l (rbp + 4, &caller) != VMMERR_SUCCESS){
 			printf("error");
 			break;
@@ -143,7 +143,6 @@ guest_backtrace (void)
 		}
 	}
 	printf (".\n");
-#endif
 }
 
 #endif

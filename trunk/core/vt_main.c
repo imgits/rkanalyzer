@@ -218,24 +218,26 @@ do_exception (void)
 		case INTR_INFO_TYPE_HARD_EXCEPTION:
 			STATUS_UPDATE (asm_lock_incl (&stat_hwexcnt));
 #ifdef RK_ANALYZER
-			if (vii.s.vector == EXCEPTION_DB){
-				asm_vmread (VMCS_EXIT_QUALIFICATION, &fake_dr6);
-				if(dr_dispatcher != NULL){
-					if(fake_dr6 & DR6_FLAG_B0)
-						dr_dispatcher(0);
-					if(fake_dr6 & DR6_FLAG_B1)
-						dr_dispatcher(1);
-					if(fake_dr6 & DR6_FLAG_B2)
-						dr_dispatcher(2);
-					if(fake_dr6 & DR6_FLAG_B3)
-						dr_dispatcher(3);
+			if(rk_has_setup){
+				if (vii.s.vector == EXCEPTION_DB){
+					asm_vmread (VMCS_EXIT_QUALIFICATION, &fake_dr6);
+					if(os_dep.dr_dispatcher != NULL){
+						if(fake_dr6 & DR6_FLAG_B0)
+							os_dep.dr_dispatcher(0);
+						if(fake_dr6 & DR6_FLAG_B1)
+							os_dep.dr_dispatcher(1);
+						if(fake_dr6 & DR6_FLAG_B2)
+							os_dep.dr_dispatcher(2);
+						if(fake_dr6 & DR6_FLAG_B3)
+							os_dep.dr_dispatcher(3);
+					}
+					break;
 				}
-				break;
-			}
 			
-			if (vii.s.vector == EXCEPTION_DB && current->u.vt.vr.rk_tf.dont_pass_db){
-				current->u.vt.vr.rk_tf.dont_pass_db = false;
-				break;
+				if (vii.s.vector == EXCEPTION_DB && current->u.vt.vr.rk_tf.dont_pass_db){
+					current->u.vt.vr.rk_tf.dont_pass_db = false;
+					break;
+				}
 			}
 							
 			if (vii.s.vector == EXCEPTION_DB &&
@@ -445,7 +447,7 @@ vt__vm_run (void)
 	enum vt__status status;
 
 #ifdef RK_ANALYZER
-	if(current->u.vt.vr.rk_tf.should_set_rf_befor_entry){
+	if((rk_has_setup) && (current->u.vt.vr.rk_tf.should_set_rf_befor_entry)){
 		vt_read_flags (&rflags);
 		rflags |= RFLAGS_RF_BIT;
 		vt_write_flags (rflags);
@@ -1100,7 +1102,7 @@ vt_mainloop (void)
 		}
 		/* when the state is switching, do single step */
 #ifdef RK_ANALYZER
-		if (current->u.vt.vr.rk_tf.tf){
+		if ((rk_has_setup) && (current->u.vt.vr.rk_tf.tf)){
 			vt__nmi ();
 			vt__event_delivery_setup ();
 			vt__vm_run_with_rk_tf ();
