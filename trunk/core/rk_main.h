@@ -135,6 +135,7 @@ struct rk_tf_state{
 	u16 cpl_last;						//The CPL of last switch
 	bool disable_protect;				//Should Disable Protection? so W/R bit won't be set
 	bool guest_msr_efer_nxe;			//Is NXE of MSR_IA32_EFER in guest set? This is used for shadow,lalala
+	bool guest_msr_debugctl_lbr;		//Guest Last Branch Record Set?
 };
 
 struct os_dependent{
@@ -143,7 +144,9 @@ struct os_dependent{
 	
 	//Dispatch Routine for Unknown code check.
 	//NB: DO NOT CALL ANY FUNCTION OF rk_nx.h IN THIS FUNCTION!!!!!!!!!!
-	unknown_code_check_dispatch unknown_code_check_dispatcher;	
+	unknown_code_check_dispatch unknown_code_check_dispatcher;
+	switch_print switch_print_dispatcher;
+	
 };
 
 extern volatile struct os_dependent os_dep;

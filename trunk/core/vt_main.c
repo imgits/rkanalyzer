@@ -218,7 +218,7 @@ do_exception (void)
 		case INTR_INFO_TYPE_HARD_EXCEPTION:
 			STATUS_UPDATE (asm_lock_incl (&stat_hwexcnt));
 #ifdef RK_ANALYZER
-			if(rk_has_setup){
+			if(current->u.vt.vr.rk_tf.initialized){
 				if (vii.s.vector == EXCEPTION_DB){
 					asm_vmread (VMCS_EXIT_QUALIFICATION, &fake_dr6);
 					if(os_dep.dr_dispatcher != NULL){
@@ -311,6 +311,12 @@ do_exception (void)
 						cs, eip);
 				}
 #endif				/* Exception monitoring test */
+
+#ifdef RK_ANALYZER
+			//TODO:Fake the DR6, DR7 and IA32_DEBUGCTL MSR here to be transparent
+			if (vii.s.vector == EXCEPTION_DB){
+			}
+#endif
 			}
 			break;
 		case INTR_INFO_TYPE_SOFT_EXCEPTION:
@@ -319,6 +325,11 @@ do_exception (void)
 			asm_vmread (VMCS_VMEXIT_INSTRUCTION_LEN, &len);
 			current->u.vt.intr.vmcs_instruction_len = len;
 			current->u.vt.event = VT_EVENT_TYPE_DELIVERY;
+#ifdef RK_ANALYZER
+			//TODO:Fake the IA32_DEBUGCTL MSR here to be transparent
+			if (vii.s.vector == EXCEPTION_DB){
+			}
+#endif
 			break;
 		case INTR_INFO_TYPE_NMI:
 			vii.s.nmi = 0; /* FIXME */

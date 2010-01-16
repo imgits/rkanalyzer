@@ -18,6 +18,7 @@
 #include "rk_nx.h"
 #include "rk_struct_win.h"
 #include "cpu.h"
+#include "desc.h"
 
 #ifdef RK_ANALYZER
 
@@ -55,6 +56,8 @@ struct guest_win_pe{
 	ulong imagebase;
 	ulong size;
 	char name[NAME_MAXLEN];
+	char fullname[NAME_MAXLEN];
+	bool legal;
 };
 
 /*
@@ -75,6 +78,11 @@ struct guest_win_exallocatepoolwithtag_call_info_stack{
 	ulong kthread_addr;
 };
 
+struct guest_win_pe_base_filter{
+	LIST1_DEFINE (struct guest_win_pe_base_filter);
+	ulong imagebase;
+};
+
 static volatile ulong kernelbase;
 static struct guest_win_pe kernel_pe;
 static spinlock_t call_info_access_lock;
@@ -82,9 +90,20 @@ static volatile ulong call_info_list_watchdog;
 static volatile ulong call_info_list_current_count;
 static spinlock_t call_info_watchdog_lock;
 
-static LIST1_DEFINE_HEAD (struct guest_win_pe, list_legal_pes);
-static LIST1_DEFINE_HEAD (struct guest_win_pe, list_illegal_pes);
+static LIST1_DEFINE_HEAD (struct guest_win_pe, list_pes);
+static LIST1_DEFINE_HEAD (struct guest_win_pe_base_filter, list_pe_base_filter);
 static LIST1_DEFINE_HEAD (struct guest_win_exallocatepoolwithtag_call_info_stack, list_call_info);	//call info stack for ExAllocatePoolWithTag in Windows
+
+static bool
+guest64 (void)
+{
+	u64 efer;
+
+	current->vmctl.read_msr (MSR_IA32_EFER, &efer);
+	if (efer & MSR_IA32_EFER_LMA_BIT)
+		return true;
+	return false;
+}
 
 static inline void init_pe_struct(struct guest_win_pe *p_pe)
 {
@@ -92,6 +111,7 @@ static inline void init_pe_struct(struct guest_win_pe *p_pe)
 	LIST1_HEAD_INIT(p_pe->list_data_symbols);
 	LIST1_HEAD_INIT(p_pe->list_code_symbols);
 	memset(p_pe->name, 0, sizeof(char) * NAME_MAXLEN);
+	memset(p_pe->fullname, 0, sizeof(char) * NAME_MAXLEN);
 }
 
 static void rk_win_call_info_check_watchdog(bool increment)
@@ -168,39 +188,118 @@ static bool rk_win_is_code_in_pe(struct guest_win_pe *p_pe, virt_t inst_addr)
 	return false;
 }
 
-static bool rk_win_is_code_in_legal_pe_list(virt_t inst_addr)
+static struct guest_win_pe* rk_win_get_pe_from_code_addr(virt_t inst_addr)
 {
 	struct guest_win_pe_section *section;
 	struct guest_win_pe *pe;
-
-	LIST1_FOREACH (list_legal_pes, pe){
+	
+	LIST1_FOREACH (list_pes, pe){
 		LIST1_FOREACH (pe->list_sections, section) {
 			if(((section->characteristics & IMAGE_SCN_MEM_EXECUTE) != 0) && 
 				(inst_addr >= section->va) && (inst_addr <= (section->va + section->size - 1)))
 			{
-				return true;
+				return pe;
 			}
 		}
 	}
+	
+	return NULL;
+}
 
+static bool rk_win_fill_ldr_data(virt_t baseaddr, LDR_DATA_TABLE_ENTRY32 *ldr_data)
+{
+	unsigned char *p_buf;
+	LIST_ENTRY32 current_entry;
+	u32 head_addr;
+	LDR_DATA_TABLE_ENTRY32 current_ldr_data;
+	ulong addr, addr2;
+	int i;
+	int err = 0;
+	
+	addr = kernelbase + PSLOADEDMODULELIST_OFFSET_IN_KERNEL;
+	p_buf = (unsigned char *)&current_entry;
+	for (i = 0; i < sizeof(LIST_ENTRY32); i++) {
+			if ((err = read_linearaddr_b (addr + i, p_buf + i))
+				!= VMMERR_SUCCESS)
+				goto failed;
+	}
+	
+	head_addr = addr;
+	addr = current_entry.Flink;
+	while(addr != head_addr){
+		p_buf = (unsigned char *)&current_ldr_data;
+		addr2 = addr - rk_struct_win_offset(LDR_DATA_TABLE_ENTRY32, InLoadOrderLinks);
+		for (i = 0; i < sizeof(LDR_DATA_TABLE_ENTRY32); i++) {
+			if ((err = read_linearaddr_b (addr2 + i, p_buf + i))
+				!= VMMERR_SUCCESS)
+				goto failed;
+		}
+		
+		if((current_ldr_data.DllBase <= baseaddr) && ((current_ldr_data.DllBase + current_ldr_data.SizeOfImage) > baseaddr)){
+			//found;
+			memcpy(ldr_data, p_buf, sizeof(LDR_DATA_TABLE_ENTRY32));
+			return true;
+		}
+		
+		addr = current_ldr_data.InLoadOrderLinks.Flink;
+	}
+	
+failed:
 	return false;
 }
 
-static bool rk_win_is_code_in_illegal_pe_list(virt_t inst_addr)
+static bool rk_win_is_addr_in_idt(virt_t addr, ulong *entry_index)
 {
-	struct guest_win_pe_section *section;
-	struct guest_win_pe *pe;
-
-	LIST1_FOREACH (list_illegal_pes, pe){
-		LIST1_FOREACH (pe->list_sections, section) {
-			if(((section->characteristics & IMAGE_SCN_MEM_EXECUTE) != 0) && 
-				(inst_addr >= section->va) && (inst_addr <= (section->va + section->size - 1)))
-			{
-				return true;
+	int err;
+	ulong idt_base, idt_limit;
+	ulong gdt_base, gdt_limit, gdt_offset;
+	ulong ldt_accessright;
+	ulong current_offset, current_index;
+	struct gatedesc32 idt_desc32;
+	struct segdesc gdt_desc32;
+	bool is_guest_64;
+	size_t idt_entry_size;
+	
+	is_guest_64 = guest64();
+	idt_entry_size = (is_guest_64 ? 16 : 8);
+	current->vmctl.read_idtr(&idt_base, &idt_limit);
+	current_index = 0;
+	
+	for(current_offset = 0;current_offset < idt_limit;current_offset += idt_entry_size, current_index++){
+		if(is_guest_64){
+			//TODO:Handle IA-32e Guest
+		}
+		else{
+			if ((err = read_linearaddr_q (idt_base + current_offset, &idt_desc32)) == VMMERR_SUCCESS){
+				if((idt_desc32.sel & 0x4) == 0){
+					//GDT
+					current->vmctl.read_gdtr(&gdt_base, &gdt_limit);
+				}
+				else{
+					//LDT
+					asm_vmread(VMCS_GUEST_LDTR_BASE, &gdt_base);
+					asm_vmread(VMCS_GUEST_LDTR_LIMIT, &gdt_limit);
+					asm_vmread(VMCS_GUEST_LDTR_ACCESS_RIGHTS, &ldt_accessright);
+					if((ldt_accessright & 0x10000) != 0){
+						continue;
+					}
+				}
+				
+				gdt_offset = (idt_desc32.sel >> 3) * 8;
+				if(gdt_offset < gdt_limit){
+					if ((err = read_linearaddr_q (gdt_base + gdt_offset, &gdt_desc32)) == VMMERR_SUCCESS){
+						if((((SEGDESC_BASE(gdt_desc32)) + (idt_desc32.offset_31_16 << 16) + idt_desc32.offset_15_0) == addr) &&
+							(((idt_desc32.offset_31_16 << 16) + idt_desc32.offset_15_0) < ((gdt_desc32.limit_19_16 << 16) + gdt_desc32.limit_15_0))){
+							if(entry_index != NULL)
+								*entry_index = current_index;
+							return true;
+						}
+					}
+				}
 			}
 		}
 	}
-
+	
 	return false;
 }
 
@@ -541,6 +640,74 @@ static void rk_win_dr_dispatch(int debug_num)
 	p_rk_tf->should_set_rf_befor_entry = true;
 }
 
+static void rk_win_build_pe_base_filter()
+{
+	//Parse the PE Section
+	//Dump all exported functions.
+	ulong pebase = 0;
+	ulong buf = 0;
+	struct guest_win_pe_base_filter *p_pe_base_filter;
+	
+	//Try Find in PsLoadedModuleList First
+	unsigned char *p_buf;
+	LIST_ENTRY32 current_entry;
+	u32 head_addr;
+	LDR_DATA_TABLE_ENTRY32 current_ldr_data;
+	ulong addr, addr2;
+	int i;
+	int err = 0;
+	
+	addr = kernelbase + PSLOADEDMODULELIST_OFFSET_IN_KERNEL;
+	p_buf = (unsigned char *)&current_entry;
+	for (i = 0; i < sizeof(LIST_ENTRY32); i++) {
+			if ((err = read_linearaddr_b (addr + i, p_buf + i))
+				!= VMMERR_SUCCESS)
+				goto nextstep;
+	}
+	
+	head_addr = addr;
+	addr = current_entry.Flink;
+	while(addr != head_addr){
+		p_buf = (unsigned char *)&current_ldr_data;
+		addr2 = addr - rk_struct_win_offset(LDR_DATA_TABLE_ENTRY32, InLoadOrderLinks);
+		for (i = 0; i < sizeof(LDR_DATA_TABLE_ENTRY32); i++) {
+			if ((err = read_linearaddr_b (addr2 + i, p_buf + i))
+				!= VMMERR_SUCCESS)
+				goto nextstep;
+		}
+		
+		p_pe_base_filter = alloc(sizeof(struct guest_win_pe_base_filter));
+		p_pe_base_filter->imagebase = current_ldr_data.DllBase;
+		LIST1_ADD(list_pe_base_filter, p_pe_base_filter);
+				
+		addr = current_ldr_data.InLoadOrderLinks.Flink;
+	}
+	
+nextstep:
+
+	//Scan Kernel Memory for additional
+	//Scan for 'MZ' on page start
+	pebase = 0x80000000;
+	while(pebase <= ((0xFFFFFFFF >> PAGESIZE_SHIFT) << PAGESIZE_SHIFT)){
+		if(read_linearaddr_l(pebase, &buf) == VMMERR_SUCCESS){
+			if(buf == 0x00905A4D){
+				//Found 'MZ'
+				p_pe_base_filter = alloc(sizeof(struct guest_win_pe_base_filter));
+				p_pe_base_filter->imagebase = pebase;
+				LIST1_ADD(list_pe_base_filter, p_pe_base_filter);
+			}
+		}
+		
+		if(pebase >= ((0xFFFFFFFF >> PAGESIZE_SHIFT) << PAGESIZE_SHIFT)){
+			break;
+		}
+		
+		pebase = pebase >> PAGESIZE_SHIFT;
+		pebase ++;
+		pebase = pebase << PAGESIZE_SHIFT;
+	}
+}
+
 //scankernel = true -> scan kernel, ignore, hint_addr
 //scankernel = false -> scan for PE, from hint_addr to lower space
 static bool rk_win_readfromguest(struct guest_win_pe *p_pe, bool scankernel, virt_t hint_addr)
@@ -568,6 +735,7 @@ static bool rk_win_readfromguest(struct guest_win_pe *p_pe, bool scankernel, vir
 	IMAGE_SECTION_HEADER section_header;
 	unsigned char* p_section_header = (unsigned char*)&section_header;
 	u8 sectionName[IMAGE_SIZEOF_SHORT_NAME + 1];
+	LDR_DATA_TABLE_ENTRY32 ldr_data;
 	
 	if(p_pe == NULL)
 	{
@@ -605,6 +773,7 @@ static bool rk_win_readfromguest(struct guest_win_pe *p_pe, bool scankernel, vir
 		step ++;
 	}
 	else{
+		//TODO: Scan in PsLoadedModuleList First before search in memory
 		pebase = (hint_addr >> PAGESIZE_SHIFT) << PAGESIZE_SHIFT;	//PE Always load at page aligned addr
 		while(pebase >= 0x80000000){
 			if(read_linearaddr_l(pebase, &buf) == VMMERR_SUCCESS){
@@ -624,6 +793,8 @@ static bool rk_win_readfromguest(struct guest_win_pe *p_pe, bool scankernel, vir
 		}
 		step ++;
 	}
+	
+	p_pe->imagebase = pebase;
 
 	if(scankernel)
 	{
@@ -684,8 +855,6 @@ static bool rk_win_readfromguest(struct guest_win_pe *p_pe, bool scankernel, vir
 		return false;
 	}
 	
-	printf("Hint = %lX, Base = %lX\n", hint_addr, pebase);
-	
 	if(scankernel)
 	{
 		//buf = pExportDirectory
@@ -697,7 +866,7 @@ static bool rk_win_readfromguest(struct guest_win_pe *p_pe, bool scankernel, vir
 		buf += pebase;	
 		step ++;
 
-		printf("pExportDirectory = %lX\n", buf);
+		//printf("pExportDirectory = %lX\n", buf);
 	
 		for (i = 0; i < sizeof(IMAGE_EXPORT_DIRECTORY); i++) {
 			if ((err = read_linearaddr_b (buf + i, buf_2 + i))
@@ -706,7 +875,7 @@ static bool rk_win_readfromguest(struct guest_win_pe *p_pe, bool scankernel, vir
 		}
 		step ++;
 
-		printf("Export.Name = %X\n", Export.Name);
+		//printf("Export.Name = %X\n", Export.Name);
 
 		//name
 		buf = Export.Name + pebase;
@@ -717,9 +886,9 @@ static bool rk_win_readfromguest(struct guest_win_pe *p_pe, bool scankernel, vir
 			if(strbuf[i] == 0)
 				break;
 		}
-		printf("FileName: %s\n", strbuf);
-		printf("Number of Functions: %d\n", Export.NumberOfFunctions);
-		printf("Number of Names: %d\n",Export.NumberOfNames);
+		//printf("FileName: %s\n", strbuf);
+		//printf("Number of Functions: %d\n", Export.NumberOfFunctions);
+		//printf("Number of Names: %d\n",Export.NumberOfNames);
 
 		//Dump the functions
 		//FIXME:各种越界问题
@@ -770,10 +939,33 @@ static bool rk_win_readfromguest(struct guest_win_pe *p_pe, bool scankernel, vir
 				//printf("Name : %s, Entry : 0x%lX\n", function->name, function->entrypoint);
 			}
 		}
-
-
-		printf("[RKAnalyzer]Get Export Table Succeed...\n");
+		//printf("[RKAnalyzer]Get Export Table Succeed...\n");
 	}
+	
+	if(rk_win_fill_ldr_data(p_pe->imagebase, &ldr_data)){
+		p_pe->size = ldr_data.SizeOfImage;
+		namelen = (ldr_data.FullDllName.Length > (NAME_MAXLEN - 1) ? (NAME_MAXLEN - 1) : ldr_data.FullDllName.Length);
+		namelen = namelen >> 1;
+		for (j = 0; j < namelen; j++) {
+			if ((err = read_linearaddr_b (ldr_data.FullDllName.Buffer + j * 2, (unsigned char *)(p_pe->fullname) + j))
+					!= VMMERR_SUCCESS){
+				break;
+			}
+		}
+		p_pe->fullname[namelen] = 0;
+		
+		namelen = (ldr_data.BaseDllName.Length > (NAME_MAXLEN - 1) ? (NAME_MAXLEN - 1) : ldr_data.BaseDllName.Length);
+		namelen = namelen >> 1;
+		for (j = 0; j < namelen; j++) {
+			if (read_linearaddr_b (ldr_data.BaseDllName.Buffer + j * 2, (unsigned char *)(p_pe->name) + j)
+					!= VMMERR_SUCCESS){
+				break;
+			}
+		}
+		p_pe->name[namelen] = 0;
+	}
+	
+	printf("Hint = %lX, Base = %lX, FullName = %s, BaseName = %s\n", hint_addr, p_pe->imagebase, p_pe->fullname, p_pe->name);
 
 	return true;
 
@@ -806,12 +998,11 @@ static void rk_win_protectpereadonlysections(struct guest_win_pe *p_pe)
 static enum rk_code_type rk_win_unknown_code_check_dispatch(virt_t addr)
 {
 	struct guest_win_pe_section *section;
+	struct guest_win_pe *pe;
 	
-	if(rk_win_is_code_in_legal_pe_list(addr)){
-		return RK_CODE_LEGAL;
-	}
-	
-	if(rk_win_is_code_in_illegal_pe_list(addr)){
+	if((pe = rk_win_get_pe_from_code_addr(addr)) != NULL){
+		if(pe->legal)
+			return RK_CODE_LEGAL;
 		return RK_CODE_ILLEGAL;
 	}
 	
@@ -819,7 +1010,8 @@ static enum rk_code_type rk_win_unknown_code_check_dispatch(virt_t addr)
 	init_pe_struct(new_pe);
 	if(rk_win_readfromguest(new_pe, false, addr))
 	{
-		LIST1_ADD(list_illegal_pes, new_pe);
+		new_pe->legal = false;
+		LIST1_ADD(list_pes, new_pe);
 		//rk_win_protectpereadonlysections(new_pe);
 		LIST1_FOREACH (new_pe->list_sections, section) {
 			if((section->characteristics & IMAGE_SCN_MEM_EXECUTE) != 0)
@@ -836,11 +1028,81 @@ static enum rk_code_type rk_win_unknown_code_check_dispatch(virt_t addr)
 	return RK_CODE_ILLEGAL;
 }
 
+static void rk_win_switch_print_dispatch(virt_t from_ip, virt_t to_ip)
+{
+	//ignore hardware interrupts and exceptions
+	//intercept calls to kernel
+	
+	//How to determine what kind of branch it is?
+	//1. jmp : [from_ip] == jmp xxx
+	//2. call : [from_ip] == call xxx
+	//3. ret : [from_ip] = ret
+	//4. iret : [from_ip] = iret
+	//5. Hardware interrupt | exception : to_ip = IDT[x], [from_ip] != jmp IDT[x], [from_ip] != call IDT[x]
+	//not ret or iret, [from_ip - instruction_len] != int x
+	//6. Software interrupt | exception : to_ip = IDT[x], [from_ip - instruction_len] == int x
+
+	//We only output:
+	//from_ip in rootkit, to_ip in kernel
+	//from_ip in kernel, to_ip in rootkit
+	//branch type 1,2,3,4,6
+	
+	struct guest_win_pe_base_filter *p_pe_base_filter;
+	struct guest_win_pe *p_from_pe, *p_to_pe;
+	bool in_filter = false;
+	ulong idt_index;
+	
+	if(rk_win_is_system_code(to_ip)){
+		p_to_pe = &kernel_pe;
+		p_from_pe = rk_win_get_pe_from_code_addr(from_ip);
+		if(p_from_pe != NULL){
+			LIST1_FOREACH (list_pe_base_filter, p_pe_base_filter) {
+				if(p_pe_base_filter->imagebase == p_from_pe->imagebase){
+					in_filter = true;
+					break;
+				}
+			}
+			if(in_filter)
+				return;
+			
+			//rootkit->kernel
+			/*
+			if(rk_win_is_addr_in_idt(to_ip, &idt_index)){
+				//TODO:Check More for Route 5
+				return;
+			}
+			*/
+			
+			printf("[RKAnalyzer][Rootkit->Kernel][%s->%s][%lX->%lX]\n", p_from_pe->name, p_to_pe->name, from_ip, to_ip);
+		}
+	}
+	else{
+		if(rk_win_is_system_code(from_ip)){
+			p_from_pe = &kernel_pe;
+			p_to_pe = rk_win_get_pe_from_code_addr(to_ip);
+			if(p_to_pe != NULL){
+				LIST1_FOREACH (list_pe_base_filter, p_pe_base_filter) {
+					if(p_pe_base_filter->imagebase == p_to_pe->imagebase){
+						in_filter = true;
+						break;
+					}
+				}
+				if(in_filter)
+					return;
+			
+				//kernel->rootkit
+				printf("[RKAnalyzer][Kernel->Rootkit][%s->%s][%lX->%lX]\n", p_from_pe->name, p_to_pe->name, from_ip, to_ip);
+			}
+		}
+	}
+}
+
 void rk_win_os_dep_setter(void)
 {	
 	os_dep.dr_dispatcher = rk_win_dr_dispatch;
 	os_dep.va_kernel_start = 0x80000000;
 	os_dep.unknown_code_check_dispatcher = rk_win_unknown_code_check_dispatch;
+	os_dep.switch_print_dispatcher = rk_win_switch_print_dispatch;
 }
 
 bool rk_win_init_global(virt_t base)
@@ -853,11 +1115,13 @@ bool rk_win_init_global(virt_t base)
 	}
 
 	printf("[RKAnalyzer]Setup Memory Areas To Protect...\n");
-
-
+	
 	rk_win_readfromguest(&kernel_pe, true, 0);
-	LIST1_ADD(list_legal_pes, &kernel_pe);
+	kernel_pe.legal = true;
+	LIST1_ADD(list_pes, &kernel_pe);
 	rk_win_protectpereadonlysections(&kernel_pe);
+	
+	rk_win_build_pe_base_filter();
 	
 	LIST1_FOREACH (kernel_pe.list_sections, section) {
 		if((section->characteristics & IMAGE_SCN_MEM_EXECUTE) != 0)
@@ -912,9 +1176,9 @@ vmmcall_rk_win_init (void)
 	call_info_list_current_count = 0;
 	init_pe_struct(&kernel_pe);
 
-	LIST1_HEAD_INIT (list_legal_pes);
-	LIST1_HEAD_INIT (list_illegal_pes);
+	LIST1_HEAD_INIT (list_pes);
 	LIST1_HEAD_INIT (list_call_info);
+	LIST1_HEAD_INIT (list_pe_base_filter);
 	spinlock_init(&call_info_access_lock);
 	spinlock_init(&call_info_watchdog_lock);
 	printf("RKAnalyzer Windows Module Initialized...\n");

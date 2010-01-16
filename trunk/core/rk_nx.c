@@ -55,19 +55,22 @@ void rk_nx_try_setup_per_vcpu()
 	// Test CPL see whether we are in kernel or user? (Should be in kernel)
 	ulong ip;
 	u64 msrdata;
+	ulong debugctl;
 	struct rk_tf_state *rk_tf = current->vmctl.get_struct_rk_tf();
 	
 	if(((os_dep.va_kernel_start >> PAGESIZE2M_SHIFT) << PAGESIZE2M_SHIFT) != os_dep.va_kernel_start){
 		panic("Error Init NX: Kernel Start Not Align on 2M Page!\n");
 	}
 	
-	
-	
 	//Enable NXE in MSR_IA32_EFER and set shadow before enable NX Protect
 	current->vmctl.read_msr(MSR_IA32_EFER, &msrdata);
 	rk_tf->guest_msr_efer_nxe = !!(msrdata & MSR_IA32_EFER_NXE_BIT);
 	msrdata |= MSR_IA32_EFER_NXE_BIT;
 	current->vmctl.write_msr(MSR_IA32_EFER, msrdata);
+	//LBR in IA32_MSR_DEBUGCTL
+	asm_vmread(VMCS_GUEST_IA32_DEBUGCTL, &debugctl);
+	debugctl |= MSR_IA32_DEBUGCTL_LBR_BIT;
+	asm_vmwrite(VMCS_GUEST_IA32_DEBUGCTL, debugctl);
 	
 	//Enable NX Protect Flag. Now IA32_EFER.NXE is shadowed
 	rk_tf->nx_enable = true;
@@ -93,6 +96,43 @@ void rk_nx_try_setup_per_vcpu()
 	else
 	{
 		panic("Error Init NX: Unknown CPL!\n");
+	}
+}
+
+static void print_switch_info()
+{
+	//TODO:Support more processor familys
+	//Currently we only support Intel Family 06_17H
+	u64 tos;
+	u64 from_ip, to_ip;
+	u64 perf_msr;
+	ulong debugctl;
+	ulong cs_base;
+	
+	current->vmctl.read_msr(MSR_IA32_PERF_CAPABILITIES, &perf_msr);
+	perf_msr &= MSR_IA32_PERF_CAPABILITIES_LBR_MASK;
+	
+	//Intel Family 06_17H
+	//Read MSR
+	current->vmctl.read_msr(MSR_LASTBRANCH_TOS, &tos);
+	tos &= 0x3;		//TOS should be from 0 to 3
+	current->vmctl.read_msr(MSR_LASTBRANCH_0_FROM_IP + tos, &from_ip);
+	current->vmctl.read_msr(MSR_LASTBRANCH_0_TO_LIP + tos, &to_ip);
+
+	
+	//send address to os module to process
+	if(perf_msr == MSR_IA32_PERF_CAPABILITIES_LBR_32){
+		current->vmctl.read_sreg_base(SREG_CS, &cs_base);
+		from_ip += cs_base;
+		to_ip += cs_base;
+	}
+	else if(perf_msr == MSR_IA32_PERF_CAPABILITIES_LBR_64LIP){
+	}
+	else if(perf_msr == MSR_IA32_PERF_CAPABILITIES_LBR_64EIP){
+	}
+	
+	if(os_dep.switch_print_dispatcher != NULL){
+		os_dep.switch_print_dispatcher(from_ip, to_ip);
 	}
 }
 
@@ -200,6 +240,19 @@ static void rk_mark_page_nx(virt_t addr)
 	pmap_close(&m);
 }
 
+static void rk_unmark_page_nx(virt_t addr)
+{
+	u64 pte;
+	pmap_t m;
+	
+	pmap_open_vmm (&m, current->spt.cr3tbl_phys, current->spt.levels);
+	pmap_seek (&m, addr, 1);
+	pte = pmap_read(&m);
+	pte = pte & (~PTE_NX_BIT);
+	pmap_write (&m, pte, 0xFFF);
+	pmap_close(&m);
+}
+
 static struct mm_code_varange* rk_check_code_type_core(virt_t virtaddr)
 {
 
@@ -218,11 +271,36 @@ static struct mm_code_varange* rk_check_code_type_core(virt_t virtaddr)
 	return NULL;
 }
 
+static struct mm_code_varange* rk_check_code_type_same_page_core(virt_t virtaddr)
+{
+
+	//TODO:Add Support for Large Pages(4M)	
+
+	struct mm_code_varange *mmvarange;
+
+	//TODO:Add Support for Large Pages(4M)
+	
+	LIST1_FOREACH (list_code_varanges, mmvarange){
+		if((virtaddr >= mmvarange->startaddr) && (virtaddr <= mmvarange->endaddr)){
+			return mmvarange;
+		}
+		if((virtaddr >> PAGESIZE_SHIFT) == (mmvarange->startaddr >> PAGESIZE_SHIFT)){
+			return mmvarange;
+		}
+		if((virtaddr >> PAGESIZE_SHIFT) == (mmvarange->endaddr >> PAGESIZE_SHIFT)){
+			return mmvarange;
+		}
+	}
+
+	return NULL;
+}
+
 void rk_manipulate_code_mmvarange_if_need(virt_t newvirtaddr, u64 gfns){
 
 	struct mm_code_varange* mmvarange;
-
+	u16 cpl_current;
 	struct rk_tf_state *rk_tf = current->vmctl.get_struct_rk_tf();
+	cpl_current = rk_nx_rd_guest_cpl();
 	
 	//We don't handle Kernel<->User switch here
 	//If switch happen with page not present, we load it and mark nx, 
@@ -232,40 +310,38 @@ void rk_manipulate_code_mmvarange_if_need(virt_t newvirtaddr, u64 gfns){
 	//1.CPL_LAST = KERNEL, newvirtaddr in userland : mark Page[newvirtaddr].NX = 1
 	//2.CPL_LAST = KERNEL, newvirtaddr in kernel :
 	//2(a). current_code_legal = true
-	//2(a)_1. newvirtaddr is legal : Do nothing
+	//2(a)_1. newvirtaddr is legal : mark Page[newvirtaddr].NX = 0
 	//2(a)_2. newvirtaddr is illegal : mark Page[newvirtaddr].NX = 1
 	//2(a)_3. newvirtaddr is not known : mark Page[newvirtaddr].NX = 1, so it will be processed in rk_check_code_mmarea on next VMEntry
 	//2(b). current_code_legal = false
 	//2(b)_1. newvirtaddr is legal : mark Page[newvirtaddr].NX = 1
-	//2(b)_2. newvirtaddr is illegal : Do nothing
+	//2(b)_2. newvirtaddr is illegal : mark Page[newvirtaddr].NX = 0
 	//2(b)_3. newvirtaddr is not known : mark Page[newvirtaddr].NX = 1, so it will be processed in rk_check_code_mmarea on next VMEntry
 	//3.CPL_LAST = USER, newvirtaddr in kernel : mark Page[newvirtaddr].NX = 1
 	//4.CPL_LAST = USER, newvirtaddr in user : Do nothing
 	
-	//printf("NX Verify : %lX\n", newvirtaddr);
-	
-	if(rk_tf->cpl_last == CPL_KERNEL){
+	if(cpl_current == CPL_KERNEL){
 		if(is_kernel_page(newvirtaddr)){
 			//Route 2
 			spinlock_lock(&mm_code_area_lock);
-			mmvarange = rk_check_code_type_core(newvirtaddr);
+			mmvarange = rk_check_code_type_same_page_core(newvirtaddr);
 			spinlock_unlock(&mm_code_area_lock);
 			
 			if(rk_tf->current_code_legal){
 				//Route 2(a)
 				if(mmvarange == NULL){
 					//Route 2(a)_3
-					//printf("Route 2(a)_3\n");
+					//printf("Route 2(a)_3, %lX, CPU[%d]\n", newvirtaddr, get_cpu_id());
 					rk_mark_page_nx(newvirtaddr);
 				}
 				else{
 					if(mmvarange->legal){
 						//Route 2(a)_1
-						//printf("Route 2(a)_1\n");
+						//printf("Route 2(a)_1, %lX, CPU[%d]\n", newvirtaddr, get_cpu_id());
 					}
 					else{
 						//Route 2(a)_2
-						//printf("Route 2(a)_2\n");
+						//printf("Route 2(a)_2, %lX, CPU[%d]\n", newvirtaddr, get_cpu_id());
 						rk_mark_page_nx(newvirtaddr);
 					}
 				}
@@ -274,18 +350,18 @@ void rk_manipulate_code_mmvarange_if_need(virt_t newvirtaddr, u64 gfns){
 				//Route 2(b)
 				if(mmvarange == NULL){
 					//Route 2(b)_3
-					//printf("Route 2(b)_3\n");
+					//printf("Route 2(b)_3, %lX, CPU[%d]\n", newvirtaddr, get_cpu_id());
 					rk_mark_page_nx(newvirtaddr);
 				}
 				else{
 					if(mmvarange->legal){
 						//Route 2(b)_1
-						//printf("Route 2(b)_1\n");
+						//printf("Route 2(b)_1, %lX, CPU[%d]\n", newvirtaddr, get_cpu_id());
 						rk_mark_page_nx(newvirtaddr);
 					}
 					else{
 						//Route 2(b)_2
-						//printf("Route 2(b)_2\n");
+						//printf("Route 2(b)_2, %lX, CPU[%d]\n", newvirtaddr, get_cpu_id());
 					}
 				}
 			}
@@ -293,19 +369,19 @@ void rk_manipulate_code_mmvarange_if_need(virt_t newvirtaddr, u64 gfns){
 		}
 		else{
 			//Route 1
-			//printf("Route 1\n");
+			//printf("Route 1, %lX, CPU[%d]\n", newvirtaddr, get_cpu_id());
 			rk_mark_page_nx(newvirtaddr);
 		}
 	}
 	else{
 		if(is_kernel_page(newvirtaddr)){
 			//Route 3
-			//printf("Route 3\n");
+			//printf("Route 3, %lX, CPU[%d]\n", newvirtaddr, get_cpu_id());
 			rk_mark_page_nx(newvirtaddr);
 		}
 		else{
 			//Route 4
-			//printf("Route 4\n");
+			//printf("Route 4, %lX, CPU[%d]\n", newvirtaddr, get_cpu_id());
 		}
 	}
 	
@@ -370,9 +446,12 @@ enum rk_nx_result rk_check_code_mmvarange(virt_t virtaddr)
 					spinlock_unlock(&mm_code_area_lock);
 					cpu_mmu_spt_updatecr3();
 				
-					if(legal)
+					if(legal){
+						print_switch_info();
 						return RK_NX_L2L;
-				
+					}
+					
+					print_switch_info();
 					return RK_NX_IL2IL;
 				}
 				
@@ -388,6 +467,7 @@ enum rk_nx_result rk_check_code_mmvarange(virt_t virtaddr)
 				rk_tf->current_code_legal = legal;
 				rk_tf->disable_protect = false;
 				cpu_mmu_spt_updatecr3();
+				print_switch_info();
 				return RK_NX_L2IL;
 			}
 			else if(legal && (!(rk_tf->current_code_legal))){
@@ -395,12 +475,15 @@ enum rk_nx_result rk_check_code_mmvarange(virt_t virtaddr)
 				rk_tf->current_code_legal = legal;
 				rk_tf->disable_protect = true;
 				cpu_mmu_spt_updatecr3();
+				print_switch_info();
 				return RK_NX_IL2L;
 			}
 			
+			panic("Strange Status in rk_nx 0, %d, %d, %lX, CPU[%d]\n", legal, rk_tf->current_code_legal, virtaddr, get_cpu_id());
 			return RK_NX_SYSTEM;
 		}
 		
+		panic("Strange Status in rk_nx 1\n");
 		return RK_NX_SYSTEM;
 	}
 	else if (rk_tf->cpl_last == CPL_USER)
@@ -436,10 +519,12 @@ enum rk_nx_result rk_check_code_mmvarange(virt_t virtaddr)
 			return RK_NX_U2K;
 		}
 		
+		panic("Strange Status in rk_nx 2\n");
 		return RK_NX_SYSTEM;
 	}
 	
 	//Should never get here if DEP is not enabled in system
+	panic("Strange Status in rk_nx 3\n");
 	return RK_NX_SYSTEM;
 }
 
