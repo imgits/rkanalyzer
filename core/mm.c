@@ -47,7 +47,8 @@
 #include "string.h"
 
 // #define VMMSIZE_ALL		(64 * 1024 * 1024)
-#define VMMSIZE_ALL		(128 * 1024 * 1024)
+// #define VMMSIZE_ALL		(128 * 1024 * 1024)
+#define VMMSIZE_ALL		(512 * 1024 * 1024)
 #define NUM_OF_PAGES		(VMMSIZE_ALL >> PAGESIZE_SHIFT)
 #define NUM_OF_ALLOCSIZE	13
 #define MAPMEM_ADDR_START	0x81000000

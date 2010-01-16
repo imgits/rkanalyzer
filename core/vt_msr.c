@@ -95,6 +95,38 @@ do_read_msr_sub (void *arg)
 }
 
 int
+vt_add_guest_msr_masked (ulong index, u64 vmm_zero_mask, u64 vmm_one_mask)
+{
+	struct msrarg m;
+	int i, num;
+	u64 data;
+
+	for (i = 0; i < current->u.vt.msr.count; i++) {
+		if (current->u.vt.msr.vmm[i].index == index)
+			return i;
+	}
+	if (i >= MAXNUM_OF_VT_MSR)
+		return -1;
+	m.msrindex = index;
+	m.msrdata = &data;
+	num = callfunc_and_getint (do_read_msr_sub, &m);
+	if (num != -1) {
+		printf ("vt_add_guest_msr: can't read msr 0x%lX. ignored.\n",
+			index);
+		return -1;
+	}
+	current->u.vt.msr.vmm[i].index = index;
+	current->u.vt.msr.vmm[i].reserved = 0;
+	current->u.vt.msr.vmm[i].data = (data | vmm_one_mask) & (~vmm_zero_mask);
+	current->u.vt.msr.guest[i].index = index;
+	current->u.vt.msr.guest[i].reserved = 0;
+	current->u.vt.msr.guest[i].data = data;
+	current->u.vt.msr.count = i + 1;
+	write_count ();
+	return i;
+}
+
+int
 vt_add_guest_msr (ulong index)
 {
 	struct msrarg m;

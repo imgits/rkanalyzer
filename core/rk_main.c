@@ -71,6 +71,7 @@ bool rk_try_setup_global (os_dependent_setter os_dep_setter)
 	os_dep.dr_dispatcher = NULL;
 	os_dep.va_kernel_start = MAX_VA;
 	os_dep.unknown_code_check_dispatcher = NULL;
+	os_dep.switch_print_dispatcher = NULL;
 	
 	//NB: Set OS Dependent values before doing other module(such as NX) setup
 	os_dep_setter();

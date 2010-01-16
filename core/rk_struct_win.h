@@ -7,6 +7,7 @@
 #define rk_struct_win_offset(type, member) (size_t)(&((type *)0)->member)
 #define CURRENT_THREAD_OFFSET_IN_KPCR 0x124
 #define SWAP_CONTEXT_ENTRY_OFFSET_IN_KERNEL 0x3A9CC
+#define PSLOADEDMODULELIST_OFFSET_IN_KERNEL 0xaf988
 
 typedef struct _IMAGE_DOS_HEADER {      // DOS .EXE header
     u16   e_magic;                     // Magic number
@@ -214,5 +215,45 @@ typedef struct _IMAGE_SECTION_HEADER {
 #define IMAGE_SCN_MEM_EXECUTE                0x20000000  // Section is executable.
 #define IMAGE_SCN_MEM_READ                   0x40000000  // Section is readable.
 #define IMAGE_SCN_MEM_WRITE                  0x80000000  // Section is writeable.
+
+typedef struct _LIST_ENTRY32 {
+	u32 Flink;
+	u32 Blink;
+} LIST_ENTRY32;
+
+typedef struct _UNICODE_STRING32 {
+	u16 Length;
+	u16 MaximumLength;
+	u32 Buffer;
+} UNICODE_STRING32;
+
+typedef struct _LDR_DATA_TABLE_ENTRY32 {
+	LIST_ENTRY32 InLoadOrderLinks;
+	LIST_ENTRY32 InMemoryOrderLinks;
+	LIST_ENTRY32 InInitializationOrderLinks;
+	u32 DllBase;
+	u32 EntryPoint;
+	u32 SizeOfImage;
+	UNICODE_STRING32 FullDllName;
+	UNICODE_STRING32 BaseDllName;
+	u32 Flags;
+	u16 LoadCount;
+	u16 TlsIndex;
+	union {
+		LIST_ENTRY32 HashLinks;
+		struct {
+			u32 SectionPointer;
+			u32 CheckSum;
+		};
+	};
+	union {
+		struct {
+			u32 TimeDataStamp;
+		};
+		struct {
+			u32 LoadedImports;
+		};
+	};
+} LDR_DATA_TABLE_ENTRY32;
 
 #endif

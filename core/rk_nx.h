@@ -36,6 +36,7 @@ enum rk_nx_result{
 struct mm_code_varange;
 
 typedef enum rk_code_type (*unknown_code_check_dispatch) (virt_t);
+typedef void (*switch_print) (virt_t from_ip, virt_t to_ip);
 typedef bool (*mmcode_callback) (struct mm_code_varange*, virt_t, bool display);
 
 // A Protected Virtual Address Range. It contains protected areas, only original ones, which are divided into pages
