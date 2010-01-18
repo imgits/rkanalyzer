@@ -232,7 +232,7 @@ static void rk_mark_page_nx(virt_t addr)
 	u64 pte;
 	pmap_t m;
 	
-	pmap_open_vmm (&m, current->spt.cr3tbl_phys, current->spt.levels);
+	pmap_open_vmm (&m, current->spt_array[NORMAL_SPT].cr3tbl_phys, current->spt_array[NORMAL_SPT].levels);
 	pmap_seek (&m, addr, 1);
 	pte = pmap_read(&m);
 	pte = pte | PTE_NX_BIT;
@@ -245,7 +245,7 @@ static void rk_unmark_page_nx(virt_t addr)
 	u64 pte;
 	pmap_t m;
 	
-	pmap_open_vmm (&m, current->spt.cr3tbl_phys, current->spt.levels);
+	pmap_open_vmm (&m, current->spt_array[NORMAL_SPT].cr3tbl_phys, current->spt_array[NORMAL_SPT].levels);
 	pmap_seek (&m, addr, 1);
 	pte = pmap_read(&m);
 	pte = pte & (~PTE_NX_BIT);
