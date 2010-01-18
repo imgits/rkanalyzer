@@ -203,7 +203,7 @@ static void rk_scan_for_pages_and_add_by_gfns(u64 gfns, struct mm_protected_page
 		return;
 	}
 
-	pmap_open_vmm (&m, current->spt.cr3tbl_phys, current->spt.levels);
+	pmap_open_vmm (&m, current->spt_array[KERNEL_ILLEGAL_SPT].cr3tbl_phys, current->spt_array[KERNEL_ILLEGAL_SPT].levels);
 	currentaddr = 0;
 	while(currentaddr < 0xFFFFFFFF){
 		pmap_seek (&m, currentaddr, 1);
@@ -310,7 +310,7 @@ mmprotect_callback callback_func, ulong *properties, int properties_count)
 	}
 	LIST1_ADD(list_varanges, varange);
 
-	pmap_open_vmm (&m, current->spt.cr3tbl_phys, current->spt.levels);
+	pmap_open_vmm (&m, current->spt_array[KERNEL_ILLEGAL_SPT].cr3tbl_phys, current->spt_array[KERNEL_ILLEGAL_SPT].levels);
 
 	currentaddr = startaddr;
 	while(currentaddr <= endaddr){
@@ -429,7 +429,7 @@ static void check_page_samegfns_list_for_delete(struct mm_protected_page_samegfn
 	pmap_t m;
 
 	if(list->refcount <= 0){
-		pmap_open_vmm (&m, current->spt.cr3tbl_phys, current->spt.levels);
+		pmap_open_vmm (&m, current->spt_array[KERNEL_ILLEGAL_SPT].cr3tbl_phys, current->spt_array[KERNEL_ILLEGAL_SPT].levels);
 		LIST1_FOREACH_DELETABLE (list->pages_of_samegfns, page_samegfns, page_samegfns_n){
 			LIST1_DEL(list->pages_of_samegfns, page_samegfns);
 			pmap_seek (&m, page_samegfns->pfn << PAGESIZE_SHIFT, 1);
@@ -459,7 +459,7 @@ static void check_page_for_delete(struct mm_protected_page *page, bool forcepres
 
 	if(LIST2_EMPTY(page->areas_in_page)){
 		if(!(page->never_paged_in_yet)){
-			pmap_open_vmm (&m, current->spt.cr3tbl_phys, current->spt.levels);
+			pmap_open_vmm (&m, current->spt_array[KERNEL_ILLEGAL_SPT].cr3tbl_phys, current->spt_array[KERNEL_ILLEGAL_SPT].levels);
 			pmap_seek (&m, page->pfn << PAGESIZE_SHIFT, 1);
 			pte = pmap_read(&m);
 			if((pte & PTE_P_BIT) || (forcepresent))  {
@@ -574,7 +574,7 @@ static void update_RW_for_page(struct mm_protected_page *page)
 	u64 pte;
 	pmap_t m;
 
-	pmap_open_vmm (&m, current->spt.cr3tbl_phys, current->spt.levels);
+	pmap_open_vmm (&m, current->spt_array[KERNEL_ILLEGAL_SPT].cr3tbl_phys, current->spt_array[KERNEL_ILLEGAL_SPT].levels);
 	pmap_seek (&m, (page->pfn << PAGESIZE_SHIFT), 1);
 	pte = pmap_read(&m);
 	if(pte & PTE_P_BIT) {
@@ -600,7 +600,7 @@ static void update_RW_for_page_samegfns(struct mm_protected_page_samegfns *page_
 	u64 pte;
 	pmap_t m;
 
-	pmap_open_vmm (&m, current->spt.cr3tbl_phys, current->spt.levels);
+	pmap_open_vmm (&m, current->spt_array[KERNEL_ILLEGAL_SPT].cr3tbl_phys, current->spt_array[KERNEL_ILLEGAL_SPT].levels);
 	pmap_seek (&m, (page_samegfns->pfn << PAGESIZE_SHIFT), 1);
 	pte = pmap_read(&m);
 	if(pte & PTE_P_BIT) {
@@ -631,7 +631,7 @@ static void try_delay_release(virt_t addr)
 	LIST1_FOREACH_DELETABLE (list_delay_release_pages, page_samegfns, page_samegfns_n){
 		if(page_samegfns->pfn == (addr >> PAGESIZE_SHIFT)){
 			LIST1_DEL (list_delay_release_pages, page_samegfns);
-			pmap_open_vmm (&m, current->spt.cr3tbl_phys, current->spt.levels);
+			pmap_open_vmm (&m, current->spt_array[KERNEL_ILLEGAL_SPT].cr3tbl_phys, current->spt_array[KERNEL_ILLEGAL_SPT].levels);
 			pmap_seek (&m, (page_samegfns->pfn << PAGESIZE_SHIFT), 1);
 			pte = pmap_read(&m);
 			if(pte & PTE_P_BIT) {
@@ -754,7 +754,7 @@ void rk_manipulate_mmarea_if_need(virt_t newvirtaddr, u64 gfns){
 				if((page_by_gfns = get_page_by_gfns(gfns, NULL)) == NULL){
 					//Route 3
 					LIST1_DEL(page_samegfns->list_belong->pages_of_samegfns, page_samegfns);
-					pmap_open_vmm (&m, current->spt.cr3tbl_phys, current->spt.levels);
+					pmap_open_vmm (&m, current->spt_array[KERNEL_ILLEGAL_SPT].cr3tbl_phys, current->spt_array[KERNEL_ILLEGAL_SPT].levels);
 					pmap_seek (&m, (page_samegfns->pfn << PAGESIZE_SHIFT), 1);
 					pte = pmap_read(&m);
 					if(pte & PTE_P_BIT) {
@@ -797,7 +797,7 @@ void rk_manipulate_mmarea_if_need(virt_t newvirtaddr, u64 gfns){
 				page_samegfns->list_belong = page_by_gfns->p_page_samegfns_list;
 				LIST1_ADD(page_by_gfns->p_page_samegfns_list->pages_of_samegfns, page_samegfns);
 
-				pmap_open_vmm (&m, current->spt.cr3tbl_phys, current->spt.levels);
+				pmap_open_vmm (&m, current->spt_array[KERNEL_ILLEGAL_SPT].cr3tbl_phys, current->spt_array[KERNEL_ILLEGAL_SPT].levels);
 				pmap_seek (&m, (page_samegfns->pfn << PAGESIZE_SHIFT), 1);
 				pte = pmap_read(&m);
 				if(pte & PTE_P_BIT) {

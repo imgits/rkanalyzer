@@ -67,23 +67,23 @@ struct map_page_data2 {
 #define GFN_UNUSED	0xFFFFFFFFFFFFFFFFULL
 
 static bool guest64 (void);
-static void update_cr3 (void);
-static void invalidate_page (ulong virtual_addr);
-static void map_page (u64 v, struct map_page_data1 m1,
+static void update_cr3 (unsigned int spt_index);
+static void invalidate_page (unsigned int spt_index, ulong virtual_addr);
+static void map_page (unsigned int spt_index, u64 v, struct map_page_data1 m1,
 		      struct map_page_data2 m2[5], u64 gfns[5], int glvl);
-static bool extern_mapsearch (struct vcpu *p, phys_t start, phys_t end);
+static bool extern_mapsearch (unsigned int spt_index, struct vcpu *p, phys_t start, phys_t end);
 static void init_global (void);
 static void init_pcpu (void);
-static int init_vcpu (void);
+static int init_vcpu (unsigned int spt_index);
 
 #ifdef CPU_MMU_SPT_1
 static void
-invalidate_page (ulong v)
+invalidate_page (unsigned int spt_index, ulong v)
 {
 	pmap_t p;
 	u64 tmp;
 
-	pmap_open_vmm (&p, current->spt.cr3tbl_phys, current->spt.levels);
+	pmap_open_vmm (&p, current->spt_array[spt_index].cr3tbl_phys, current->spt_array[spt_index].levels);
 	pmap_seek (&p, v, 2);
 	tmp = pmap_read (&p);
 	if (tmp & PDE_P_BIT) {
@@ -91,7 +91,7 @@ invalidate_page (ulong v)
 			pmap_write (&p, tmp & ~PDE_AVAILABLE1_BIT, 0xFFF);
 			pmap_setlevel (&p, 1);
 			pmap_clear (&p);
-			if (current->spt.levels >= 3) {
+			if (current->spt_array[spt_index].levels >= 3) {
 				pmap_seek (&p, v ^ PAGESIZE2M, 2);
 				tmp = pmap_read (&p);
 				if (tmp & PDE_P_BIT) {
@@ -112,7 +112,7 @@ invalidate_page (ulong v)
 }
 
 static void
-map_page (u64 v, struct map_page_data1 m1, struct map_page_data2 m2[5],
+map_page (unsigned int spt_index, u64 v, struct map_page_data1 m1, struct map_page_data2 m2[5],
 	  u64 gfns[5], int glvl)
 {
 	u64 hphys;
@@ -129,18 +129,18 @@ map_page (u64 v, struct map_page_data1 m1, struct map_page_data2 m2[5],
 			m2[0].rw = 1;
 		}
 	}
-	pmap_open_vmm (&p, current->spt.cr3tbl_phys, current->spt.levels);
+	pmap_open_vmm (&p, current->spt_array[spt_index].cr3tbl_phys, current->spt_array[spt_index].levels);
 	pmap_seek (&p, v, 1);
 	tmp = pmap_read (&p);
 	for (; (l = pmap_getreadlevel (&p)) > 1; tmp = pmap_read (&p)) {
 		pmap_setlevel (&p, l);
-		if (current->spt.cnt == NUM_OF_SPTTBL) {
-			pmap_setlevel (&p, current->spt.levels);
+		if (current->spt_array[spt_index].cnt == NUM_OF_SPTTBL) {
+			pmap_setlevel (&p, current->spt_array[spt_index].levels);
 			pmap_clear (&p);
-			current->spt.cnt = 0;
+			current->spt_array[spt_index].cnt = 0;
 			continue;
 		}
-		pmap_write (&p, current->spt.tbl_phys[current->spt.cnt++] |
+		pmap_write (&p, current->spt_array[spt_index].tbl_phys[current->spt_array[spt_index].cnt++] |
 			    PDE_P_BIT, PDE_P_BIT);
 		pmap_setlevel (&p, l - 1);
 		pmap_clear (&p);
@@ -171,7 +171,7 @@ map_page (u64 v, struct map_page_data1 m1, struct map_page_data2 m2[5],
 }
 
 static bool
-extern_mapsearch (struct vcpu *p, phys_t start, phys_t end)
+extern_mapsearch (unsigned int spt_index, struct vcpu *p, phys_t start, phys_t end)
 {
 #ifdef CPU_MMU_SPT_USE_PAE
 	u64 *e, tmp, mask = PTE_ADDR_MASK64;
@@ -184,8 +184,8 @@ extern_mapsearch (struct vcpu *p, phys_t start, phys_t end)
 
 	start &= ~PAGESIZE_MASK;
 	end |= PAGESIZE_MASK;
-	for (i = 0; i < p->spt.cnt; i++) {
-		e = p->spt.tbl[i];
+	for (i = 0; i < p->spt_array[spt_index].cnt; i++) {
+		e = p->spt_array[spt_index].tbl[i];
 		for (j = 0; j < n; j++) {
 			tmp = e[j] & mask;
 			if ((e[j] & PTE_P_BIT) && start <= tmp && tmp <= end)
@@ -196,24 +196,24 @@ extern_mapsearch (struct vcpu *p, phys_t start, phys_t end)
 }
 
 static void
-update_cr3 (void)
+update_cr3 (unsigned int spt_index)
 {
 	pmap_t p;
 
 #ifdef CPU_MMU_SPT_USE_PAE
-	current->spt.levels = guest64 () ? 4 : 3;
+	current->spt_array[spt_index].levels = guest64 () ? 4 : 3;
 #else
-	current->spt.levels = 2;
+	current->spt_array[spt_index].levels = 2;
 #endif
-	pmap_open_vmm (&p, current->spt.cr3tbl_phys, current->spt.levels);
+	pmap_open_vmm (&p, current->spt_array[spt_index].cr3tbl_phys, current->spt_array[spt_index].levels);
 	pmap_clear (&p);
 	pmap_close (&p);
-	current->spt.cnt = 0;
-	current->vmctl.spt_setcr3 (current->spt.cr3tbl_phys);
+	current->spt_array[spt_index].cnt = 0;
+	current->vmctl.spt_setcr3 (current->spt_array[spt_index].cr3tbl_phys);
 }
 
 static bool
-spt_tlbflush (void)
+spt_tlbflush (unsigned int spt_index)
 {
 	return true;
 }
@@ -229,15 +229,15 @@ init_pcpu (void)
 }
 
 static int
-init_vcpu (void)
+init_vcpu (unsigned int spt_index)
 {
 	int i;
 
-	alloc_page (&current->spt.cr3tbl, &current->spt.cr3tbl_phys);
+	alloc_page (&current->spt_array[spt_index].cr3tbl, &current->spt_array[spt_index].cr3tbl_phys);
 	for (i = 0; i < NUM_OF_SPTTBL; i++)
-		alloc_page (&current->spt.tbl[i], &current->spt.tbl_phys[i]);
-	current->spt.cnt = 0;
-	memset (current->spt.cr3tbl, 0, PAGESIZE);
+		alloc_page (&current->spt_array[spt_index].tbl[i], &current->spt_array[spt_index].tbl_phys[i]);
+	current->spt_array[spt_index].cnt = 0;
+	memset (current->spt_array[spt_index].cr3tbl, 0, PAGESIZE);
 	return 0;
 }
 #endif /* CPU_MMU_SPT_1 */
@@ -265,7 +265,7 @@ struct sptlist {
 	struct cpu_mmu_spt_data *spt;
 };
 
-static LIST1_DEFINE_HEAD (struct sptlist, list1_spt);
+static LIST1_DEFINE_HEAD (struct sptlist, list1_spt_array[NUM_OF_SPT]);
 
 static u32 stat_mapcnt = 0;
 static u32 stat_cr3cnt = 0;
@@ -285,19 +285,19 @@ static u32 stat_pdhitcnt = 0;
 static u32 stat_pdnew2cnt = 0;
 
 static void
-invalidate_page (ulong v)
+invalidate_page (unsigned int spt_index, ulong v)
 {
 	pmap_t p;
 	u64 tmp;
 
 	STATUS_UPDATE (asm_lock_incl (&stat_invlpgcnt));
-	pmap_open_vmm (&p, current->spt.cr3tbl_phys, current->spt.levels);
+	pmap_open_vmm (&p, current->spt_array[spt_index].cr3tbl_phys, current->spt_array[spt_index].levels);
 	pmap_seek (&p, v, 2);
 	tmp = pmap_read (&p);
 	if (tmp & PDE_P_BIT) {
 		if (tmp & PDE_AVAILABLE1_BIT) {
 			pmap_write (&p, 0, 0xFFF);
-			if (current->spt.levels >= 3) {
+			if (current->spt_array[spt_index].levels >= 3) {
 				pmap_seek (&p, v ^ PAGESIZE2M, 2);
 				tmp = pmap_read (&p);
 				if (tmp & PDE_P_BIT)
@@ -323,43 +323,43 @@ pte_and (u64 *pte, u64 mask)
 }
 
 static bool
-update_rwmap (u64 gfn, void *pte)
+update_rwmap (unsigned int spt_index, u64 gfn, void *pte)
 {
 	unsigned int i, j, k, kk;
 	bool r = false;
 
-	spinlock_lock (&current->spt.rwmap_lock);
-	i = current->spt.rwmap_fail;
-	j = current->spt.rwmap_normal;
-	k = current->spt.rwmap_free;
+	spinlock_lock (&current->spt_array[spt_index].rwmap_lock);
+	i = current->spt_array[spt_index].rwmap_fail;
+	j = current->spt_array[spt_index].rwmap_normal;
+	k = current->spt_array[spt_index].rwmap_free;
 	if (i != j)
 		r = true;
 	while (i != j) {
-		pte_and (current->spt.rwmap[i].pte, ~(PTE_D_BIT | PTE_RW_BIT));
+		pte_and (current->spt_array[spt_index].rwmap[i].pte, ~(PTE_D_BIT | PTE_RW_BIT));
 		i = (i + 1) % NUM_OF_SPTRWMAP;
 	}
 	/* i == j */
 	if (pte != NULL) {
 		while (j != k) {
-			if (current->spt.rwmap[j].gfn == gfn &&
-			    current->spt.rwmap[j].pte == pte)
+			if (current->spt_array[spt_index].rwmap[j].gfn == gfn &&
+			    current->spt_array[spt_index].rwmap[j].pte == pte)
 				goto skip;
 			j = (j + 1) % NUM_OF_SPTRWMAP;
 		}
 		kk = (k + 1) % NUM_OF_SPTRWMAP;
 		if (kk == i) {
-			pte_and (current->spt.rwmap[i].pte,
+			pte_and (current->spt_array[spt_index].rwmap[i].pte,
 				 ~(PTE_D_BIT | PTE_RW_BIT));
 			i = j = (i + 1) % NUM_OF_SPTRWMAP;
-			current->spt.rwmap_normal = j;
+			current->spt_array[spt_index].rwmap_normal = j;
 		}
-		current->spt.rwmap[k].gfn = gfn;
-		current->spt.rwmap[k].pte = pte;
-		current->spt.rwmap_free = kk;
+		current->spt_array[spt_index].rwmap[k].gfn = gfn;
+		current->spt_array[spt_index].rwmap[k].pte = pte;
+		current->spt_array[spt_index].rwmap_free = kk;
 	}
 skip:
-	current->spt.rwmap_fail = i;
-	spinlock_unlock (&current->spt.rwmap_lock);
+	current->spt_array[spt_index].rwmap_fail = i;
+	spinlock_unlock (&current->spt_array[spt_index].rwmap_lock);
 	return r;
 }
 
@@ -402,7 +402,7 @@ swap_rwmap (struct cpu_mmu_spt_rwmap *rwmap, unsigned int i, unsigned int j)
 }
 
 static void
-update_shadow (u64 gfn0, u64 *pte, bool needrw)
+update_shadow (unsigned int spt_index, u64 gfn0, u64 *pte, bool needrw)
 {
 	struct cpu_mmu_spt_data *spt;
 	struct sptlist *listspt;
@@ -411,7 +411,7 @@ update_shadow (u64 gfn0, u64 *pte, bool needrw)
 	u64 key, keytmp;
 
 	key = gfn0 << KEY_GFN_SHIFT;
-	LIST1_FOREACH (list1_spt, listspt) {
+	LIST1_FOREACH (list1_spt_array[spt_index], listspt) {
 		spt = listspt->spt;
 		spinlock_lock (&spt->shadow1_lock);
 		j = spt->shadow1_normal;
@@ -457,18 +457,18 @@ update_shadow (u64 gfn0, u64 *pte, bool needrw)
 }
 
 static bool
-is_shadow1_pde_ok (u64 pde, u64 key)
+is_shadow1_pde_ok (unsigned int spt_index, u64 pde, u64 key)
 {
 	unsigned int i, j;
 	u64 phys;
 
-	i = current->spt.shadow1_modified;
-	j = current->spt.shadow1_free;
+	i = current->spt_array[spt_index].shadow1_modified;
+	j = current->spt_array[spt_index].shadow1_free;
 	phys = pde & PDE_ADDR_MASK64;
 	while (i != j) {
-		if (key == current->spt.shadow1[i].key &&
-		    phys == current->spt.shadow1[i].phys) {
-			current->spt.shadow1[i].cleared = false;
+		if (key == current->spt_array[spt_index].shadow1[i].key &&
+		    phys == current->spt_array[spt_index].shadow1[i].phys) {
+			current->spt_array[spt_index].shadow1[i].cleared = false;
 			return true;
 		}
 		i = (i + 1) % NUM_OF_SPTSHADOW1;
@@ -477,18 +477,18 @@ is_shadow1_pde_ok (u64 pde, u64 key)
 }
 
 static bool
-is_shadow2_pdpe_ok (u64 pdpe, u64 key)
+is_shadow2_pdpe_ok (unsigned int spt_index, u64 pdpe, u64 key)
 {
 	unsigned int i, j;
 	u64 phys;
 
-	i = current->spt.shadow2_modified;
-	j = current->spt.shadow2_free;
+	i = current->spt_array[spt_index].shadow2_modified;
+	j = current->spt_array[spt_index].shadow2_free;
 	phys = pdpe & PDE_ADDR_MASK64;
 	while (i != j) {
-		if (key == current->spt.shadow2[i].key &&
-		    phys == current->spt.shadow2[i].phys) {
-			current->spt.shadow2[i].cleared = false;
+		if (key == current->spt_array[spt_index].shadow2[i].key &&
+		    phys == current->spt_array[spt_index].shadow2[i].phys) {
+			current->spt_array[spt_index].shadow2[i].cleared = false;
 			return true;
 		}
 		i = (i + 1) % NUM_OF_SPTSHADOW2;
@@ -497,74 +497,74 @@ is_shadow2_pdpe_ok (u64 pdpe, u64 key)
 }
 
 static u64
-find_shadow1 (u64 key)
+find_shadow1 (unsigned int spt_index, u64 key)
 {
 	unsigned int i, j, k, l;
 
-	j = current->spt.shadow1_modified;
-	k = current->spt.shadow1_normal;
-	l = current->spt.shadow1_free;
+	j = current->spt_array[spt_index].shadow1_modified;
+	k = current->spt_array[spt_index].shadow1_normal;
+	l = current->spt_array[spt_index].shadow1_free;
 	i = k;
 	while (i != l) {
-		if (key == current->spt.shadow1[i].key)
+		if (key == current->spt_array[spt_index].shadow1[i].key)
 			goto found;
 		i = (i + 1) % NUM_OF_SPTSHADOW1;
 	}
 	return 0;
 found:
 	if (i != k)
-		swap_shadow (current->spt.shadow1, i, k);
+		swap_shadow (current->spt_array[spt_index].shadow1, i, k);
 	i = k;
 	k = (k + 1) % NUM_OF_SPTSHADOW1;
 	if (i != j)
-		swap_shadow (current->spt.shadow1, i, j);
+		swap_shadow (current->spt_array[spt_index].shadow1, i, j);
 	i = j;
 	j = (j + 1) % NUM_OF_SPTSHADOW1;
 	if (true)		/* always i != l */
-		swap_shadow (current->spt.shadow1, i, l);
+		swap_shadow (current->spt_array[spt_index].shadow1, i, l);
 	i = l;
 	l = (l + 1) % NUM_OF_SPTSHADOW1;
-	current->spt.shadow1_modified = j;
-	current->spt.shadow1_normal = k;
-	current->spt.shadow1_free = l;
-	current->spt.shadow1[i].cleared = false;
-	return current->spt.shadow1[i].phys | PDE_P_BIT |
+	current->spt_array[spt_index].shadow1_modified = j;
+	current->spt_array[spt_index].shadow1_normal = k;
+	current->spt_array[spt_index].shadow1_free = l;
+	current->spt_array[spt_index].shadow1[i].cleared = false;
+	return current->spt_array[spt_index].shadow1[i].phys | PDE_P_BIT |
 		((key & KEY_LARGEPAGE) ? PDE_AVAILABLE1_BIT : 0);
 }
 
 static u64
-find_shadow2 (u64 key)
+find_shadow2 (unsigned int spt_index, u64 key)
 {
 	unsigned int i, j, k, l;
 
-	j = current->spt.shadow2_modified;
-	k = current->spt.shadow2_normal;
-	l = current->spt.shadow2_free;
+	j = current->spt_array[spt_index].shadow2_modified;
+	k = current->spt_array[spt_index].shadow2_normal;
+	l = current->spt_array[spt_index].shadow2_free;
 	i = k;
 	while (i != l) {
-		if (key == current->spt.shadow2[i].key)
+		if (key == current->spt_array[spt_index].shadow2[i].key)
 			goto found;
 		i = (i + 1) % NUM_OF_SPTSHADOW2;
 	}
 	return 0;
 found:
 	if (i != k)
-		swap_shadow (current->spt.shadow2, i, k);
+		swap_shadow (current->spt_array[spt_index].shadow2, i, k);
 	i = k;
 	k = (k + 1) % NUM_OF_SPTSHADOW2;
 	if (i != j)
-		swap_shadow (current->spt.shadow2, i, j);
+		swap_shadow (current->spt_array[spt_index].shadow2, i, j);
 	i = j;
 	j = (j + 1) % NUM_OF_SPTSHADOW2;
 	if (true)		/* always i != l */
-		swap_shadow (current->spt.shadow2, i, l);
+		swap_shadow (current->spt_array[spt_index].shadow2, i, l);
 	i = l;
 	l = (l + 1) % NUM_OF_SPTSHADOW2;
-	current->spt.shadow2_modified = j;
-	current->spt.shadow2_normal = k;
-	current->spt.shadow2_free = l;
-	current->spt.shadow2[i].cleared = false;
-	return current->spt.shadow2[i].phys | PDE_P_BIT |
+	current->spt_array[spt_index].shadow2_modified = j;
+	current->spt_array[spt_index].shadow2_normal = k;
+	current->spt_array[spt_index].shadow2_free = l;
+	current->spt_array[spt_index].shadow2[i].cleared = false;
+	return current->spt_array[spt_index].shadow2[i].phys | PDE_P_BIT |
 		((key & KEY_LARGEPAGE) ? PDE_AVAILABLE1_BIT : 0);
 }
 
@@ -578,65 +578,65 @@ clear_shadow (struct cpu_mmu_spt_shadow *shadow)
 }
 
 static void
-clean_modified_shadow2 (bool freeflag)
+clean_modified_shadow2 (spt_index, unsigned int spt_index, bool freeflag)
 {
 	unsigned int i, j;
 	
-	i = current->spt.shadow2_modified;
-	j = current->spt.shadow2_normal;
+	i = current->spt_array[spt_index].shadow2_modified;
+	j = current->spt_array[spt_index].shadow2_normal;
 	if (i == j)
 		return;
 	while (i != j) {
-		clear_shadow (&current->spt.shadow2[i]);
+		clear_shadow (&current->spt_array[spt_index].shadow2[i]);
 		i = (i + 1) % NUM_OF_SPTSHADOW2;
 	}
 	if (freeflag)
-		current->spt.shadow2_modified = i;
+		current->spt_array[spt_index].shadow2_modified = i;
 }
 
 static void
-clean_modified_shadow1 (bool freeflag)
+clean_modified_shadow1 (spt_index, unsigned int spt_index, bool freeflag)
 {
 	unsigned int i, j;
 
 	/* freeflag = true; */	/* FIXME: deleting this, more freezes */
-	i = current->spt.shadow1_modified;
-	j = current->spt.shadow1_normal;
+	i = current->spt_array[spt_index].shadow1_modified;
+	j = current->spt_array[spt_index].shadow1_normal;
 	if (i == j)
 		return;
 	while (i != j) {
-		clear_shadow (&current->spt.shadow1[i]);
+		clear_shadow (&current->spt_array[spt_index].shadow1[i]);
 		i = (i + 1) % NUM_OF_SPTSHADOW1;
 	}
 	if (freeflag) {
-		current->spt.shadow1_modified = i;
-		spinlock_lock (&current->spt.shadow2_lock);
-		current->spt.shadow2_normal = current->spt.shadow2_free;
-		clean_modified_shadow2 (false);
-		spinlock_unlock (&current->spt.shadow2_lock);
+		current->spt_array[spt_index].shadow1_modified = i;
+		spinlock_lock (&current->spt_array[spt_index].shadow2_lock);
+		current->spt_array[spt_index].shadow2_normal = current->spt_array[spt_index].shadow2_free;
+		clean_modified_shadow2 (spt_index, spt_index, false);
+		spinlock_unlock (&current->spt_array[spt_index].shadow2_lock);
 	}
 }
 
 static bool
-new_shadow1 (u64 key, u64 *pde, unsigned int *ii)
+new_shadow1 (unsigned int spt_index, u64 key, u64 *pde, unsigned int *ii)
 {
 	unsigned int i, j, k, l;
 
-	j = current->spt.shadow1_modified;
-	k = current->spt.shadow1_normal;
-	l = current->spt.shadow1_free;
+	j = current->spt_array[spt_index].shadow1_modified;
+	k = current->spt_array[spt_index].shadow1_normal;
+	l = current->spt_array[spt_index].shadow1_free;
 	for (i = j; i != k; i = (i + 1) % NUM_OF_SPTSHADOW1) {
-		if (key == current->spt.shadow1[i].key) {
-			clear_shadow (&current->spt.shadow1[i]);
+		if (key == current->spt_array[spt_index].shadow1[i].key) {
+			clear_shadow (&current->spt_array[spt_index].shadow1[i]);
 			if (i != j)
-				swap_shadow (current->spt.shadow1, i, j);
+				swap_shadow (current->spt_array[spt_index].shadow1, i, j);
 			i = j;
 			j = (j + 1) % NUM_OF_SPTSHADOW1;
-			swap_shadow (current->spt.shadow1, i, l);
+			swap_shadow (current->spt_array[spt_index].shadow1, i, l);
 			i = l;
 			l = (l + 1) % NUM_OF_SPTSHADOW1;
-			current->spt.shadow1_modified = j;
-			current->spt.shadow1_free = l;
+			current->spt_array[spt_index].shadow1_modified = j;
+			current->spt_array[spt_index].shadow1_free = l;
 			STATUS_UPDATE (asm_lock_incl (&stat_ptfoundcnt));
 			goto found;
 		}
@@ -644,48 +644,48 @@ new_shadow1 (u64 key, u64 *pde, unsigned int *ii)
 	}
 	i = l;
 	l = (l + 1) % NUM_OF_SPTSHADOW1;
-	if (l == current->spt.shadow1_modified) {
+	if (l == current->spt_array[spt_index].shadow1_modified) {
 		if (k != i) {
 			k = (k + 1) % NUM_OF_SPTSHADOW1;
-			current->spt.shadow1_normal = k;
+			current->spt_array[spt_index].shadow1_normal = k;
 		}
-		clean_modified_shadow1 (true);
-		if (l == current->spt.shadow1_modified)
+		clean_modified_shadow1 (spt_index, spt_index, true);
+		if (l == current->spt_array[spt_index].shadow1_modified)
 			panic ("new_shadow fatal error");
 		STATUS_UPDATE (asm_lock_incl (&stat_ptfullcnt));
 		return false;
 	}
 	STATUS_UPDATE (asm_lock_incl (&stat_ptnewcnt));
-	current->spt.shadow1[i].key = key;
-	current->spt.shadow1_free = l;
+	current->spt_array[spt_index].shadow1[i].key = key;
+	current->spt_array[spt_index].shadow1_free = l;
 found:
-	current->spt.shadow1[i].cleared = false;
-	*pde = current->spt.shadow1[i].phys | PDE_P_BIT |
+	current->spt_array[spt_index].shadow1[i].cleared = false;
+	*pde = current->spt_array[spt_index].shadow1[i].phys | PDE_P_BIT |
 		((key & KEY_LARGEPAGE) ? PDE_AVAILABLE1_BIT : 0);
 	*ii = i;
 	return true;
 }
 
 static bool
-new_shadow2 (u64 key, u64 *pde, unsigned int *ii)
+new_shadow2 (unsigned int spt_index, u64 key, u64 *pde, unsigned int *ii)
 {
 	unsigned int i, j, k, l;
 
-	j = current->spt.shadow2_modified;
-	k = current->spt.shadow2_normal;
-	l = current->spt.shadow2_free;
+	j = current->spt_array[spt_index].shadow2_modified;
+	k = current->spt_array[spt_index].shadow2_normal;
+	l = current->spt_array[spt_index].shadow2_free;
 	for (i = j; i != k; i = (i + 1) % NUM_OF_SPTSHADOW2) {
-		if (key == current->spt.shadow2[i].key) {
-			clear_shadow (&current->spt.shadow2[i]);
+		if (key == current->spt_array[spt_index].shadow2[i].key) {
+			clear_shadow (&current->spt_array[spt_index].shadow2[i]);
 			if (i != j)
-				swap_shadow (current->spt.shadow2, i, j);
+				swap_shadow (current->spt_array[spt_index].shadow2, i, j);
 			i = j;
 			j = (j + 1) % NUM_OF_SPTSHADOW2;
-			swap_shadow (current->spt.shadow2, i, l);
+			swap_shadow (current->spt_array[spt_index].shadow2, i, l);
 			i = l;
 			l = (l + 1) % NUM_OF_SPTSHADOW2;
-			current->spt.shadow2_modified = j;
-			current->spt.shadow2_free = l;
+			current->spt_array[spt_index].shadow2_modified = j;
+			current->spt_array[spt_index].shadow2_free = l;
 			STATUS_UPDATE (asm_lock_incl (&stat_pdfoundcnt));
 			goto found;
 		}
@@ -693,29 +693,29 @@ new_shadow2 (u64 key, u64 *pde, unsigned int *ii)
 	}
 	i = l;
 	l = (l + 1) % NUM_OF_SPTSHADOW2;
-	if (l == current->spt.shadow2_modified) {
+	if (l == current->spt_array[spt_index].shadow2_modified) {
 		if (k != i) {
 			k = (k + 1) % NUM_OF_SPTSHADOW2;
-			current->spt.shadow2_normal = k;
+			current->spt_array[spt_index].shadow2_normal = k;
 		}
-		clean_modified_shadow2 (true);
-		if (l == current->spt.shadow2_modified)
+		clean_modified_shadow2 (spt_index, spt_index, true);
+		if (l == current->spt_array[spt_index].shadow2_modified)
 			panic ("new_shadow fatal error");
 		STATUS_UPDATE (asm_lock_incl (&stat_pdfullcnt));
 		return false;
 	}
 	STATUS_UPDATE (asm_lock_incl (&stat_pdnewcnt));
-	current->spt.shadow2[i].key = key;
-	current->spt.shadow2_free = l;
+	current->spt_array[spt_index].shadow2[i].key = key;
+	current->spt_array[spt_index].shadow2_free = l;
 found:
-	current->spt.shadow2[i].cleared = false;
-	*pde = current->spt.shadow2[i].phys | PDE_P_BIT;
+	current->spt_array[spt_index].shadow2[i].cleared = false;
+	*pde = current->spt_array[spt_index].shadow2[i].phys | PDE_P_BIT;
 	*ii = i;
 	return true;
 }
 
 static bool
-makerdonly (u64 key)
+makerdonly (unsigned int spt_index, u64 key)
 {
 	struct cpu_mmu_spt_data *spt;
 	struct sptlist *listspt;
@@ -726,7 +726,7 @@ makerdonly (u64 key)
 	if (key & KEY_LARGEPAGE)
 		return true;
 	gfn = key >> KEY_GFN_SHIFT;
-	LIST1_FOREACH (list1_spt, listspt) {
+	LIST1_FOREACH (list1_spt_array[spt_index], listspt) {
 		spt = listspt->spt;
 		spinlock_lock (&spt->rwmap_lock);
 		j = spt->rwmap_fail;
@@ -765,31 +765,31 @@ makerdonly (u64 key)
 }
 
 static void
-modified_shadow1 (unsigned int i)
+modified_shadow1 (unsigned int spt_index, unsigned int i)
 {
 	unsigned int j;
 
-	j = current->spt.shadow1_normal;
+	j = current->spt_array[spt_index].shadow1_normal;
 	if (i != j)
-		swap_shadow (current->spt.shadow1, i, j);
+		swap_shadow (current->spt_array[spt_index].shadow1, i, j);
 	j = (j + 1) % NUM_OF_SPTSHADOW1;
-	current->spt.shadow1_normal = j;
+	current->spt_array[spt_index].shadow1_normal = j;
 }
 
 static void
-modified_shadow2 (unsigned int i)
+modified_shadow2 (unsigned int spt_index, unsigned int i)
 {
 	unsigned int j;
 
-	j = current->spt.shadow2_normal;
+	j = current->spt_array[spt_index].shadow2_normal;
 	if (i != j)
-		swap_shadow (current->spt.shadow2, i, j);
+		swap_shadow (current->spt_array[spt_index].shadow2, i, j);
 	j = (j + 1) % NUM_OF_SPTSHADOW2;
-	current->spt.shadow2_normal = j;
+	current->spt_array[spt_index].shadow2_normal = j;
 }
 
 static bool
-setpde (pmap_t *p, u64 pde, u64 key, u64 gfnw, struct map_page_data2 m)
+setpde (unsigned int spt_index, pmap_t *p, u64 pde, u64 key, u64 gfnw, struct map_page_data2 m)
 {
 	bool r = true;
 	unsigned int i;
@@ -799,101 +799,101 @@ setpde (pmap_t *p, u64 pde, u64 key, u64 gfnw, struct map_page_data2 m)
 		(m.us ? PDE_US_BIT : 0) |
 		(m.nx ? PDE_NX_BIT : 0);
 	u = PDE_AVAILABLE1_BIT | PDE_P_BIT;
-	spinlock_lock (&current->spt.shadow1_lock);
+	spinlock_lock (&current->spt_array[spt_index].shadow1_lock);
 	if (pde) {
-		if (is_shadow1_pde_ok (pde, key)) {
+		if (is_shadow1_pde_ok (spt_index, pde, key)) {
 			pmap_write (p, pde | pdeflags, u);
 			STATUS_UPDATE (asm_lock_incl (&stat_ptgoodcnt));
 			goto ret;
 		}
 	}
-	pde = find_shadow1 (key);
+	pde = find_shadow1 (spt_index, key);
 	if (pde) {
 		pmap_write (p, pde | pdeflags, u);
 		STATUS_UPDATE (asm_lock_incl (&stat_pthitcnt));
 		goto ret;
 	}
-	r = new_shadow1 (key, &pde, &i);
+	r = new_shadow1 (spt_index, key, &pde, &i);
 	if (!r)
 		goto ret;
 	pmap_write (p, pde | pdeflags, u);
 	if (gfnw != GFN_UNUSED && !(key & KEY_LARGEPAGE) &&
 	    gfnw == (key >> KEY_GFN_SHIFT)) {
-		modified_shadow1 (i);
+		modified_shadow1 (spt_index, i);
 		goto ret;
 	}
-	spinlock_unlock (&current->spt.shadow1_lock);
-	if (!makerdonly (key)) {
+	spinlock_unlock (&current->spt_array[spt_index].shadow1_lock);
+	if (!makerdonly (spt_index, key)) {
 		STATUS_UPDATE (asm_lock_incl (&stat_ptnew2cnt));
-		spinlock_lock (&current->spt.shadow1_lock);
-		modified_shadow1 (i);
-		spinlock_unlock (&current->spt.shadow1_lock);
+		spinlock_lock (&current->spt_array[spt_index].shadow1_lock);
+		modified_shadow1 (spt_index, i);
+		spinlock_unlock (&current->spt_array[spt_index].shadow1_lock);
 	}
 	return r;
 ret:
-	spinlock_unlock (&current->spt.shadow1_lock);
+	spinlock_unlock (&current->spt_array[spt_index].shadow1_lock);
 	return r;
 }
 
 static bool
-setpdpe (pmap_t *p, u64 pdpe, u64 key, u64 gfnw)
+setpdpe (unsigned int spt_index, pmap_t *p, u64 pdpe, u64 key, u64 gfnw)
 {
 	bool r = true;
 	unsigned int i;
 
-	spinlock_lock (&current->spt.shadow2_lock);
+	spinlock_lock (&current->spt_array[spt_index].shadow2_lock);
 	if (pdpe) {
-		if (is_shadow2_pdpe_ok (pdpe, key)) {
+		if (is_shadow2_pdpe_ok (spt_index, pdpe, key)) {
 			pmap_write (p, pdpe, PDE_P_BIT);
 			STATUS_UPDATE (asm_lock_incl (&stat_pdgoodcnt));
 			goto ret;
 		}
 	}
-	pdpe = find_shadow2 (key);
+	pdpe = find_shadow2 (spt_index, key);
 	if (pdpe) {
 		pmap_write (p, pdpe, PDE_P_BIT);
 		STATUS_UPDATE (asm_lock_incl (&stat_pdhitcnt));
 		goto ret;
 	}
-	r = new_shadow2 (key, &pdpe, &i);
+	r = new_shadow2 (spt_index, key, &pdpe, &i);
 	if (!r)
 		goto ret;
 	pmap_write (p, pdpe, PDE_P_BIT);
 	if (gfnw != GFN_UNUSED && gfnw == (key >> KEY_GFN_SHIFT)) {
-		modified_shadow2 (i);
+		modified_shadow2 (spt_index, i);
 		goto ret;
 	}
-	spinlock_unlock (&current->spt.shadow2_lock);
-	if (!makerdonly (key)) {
+	spinlock_unlock (&current->spt_array[spt_index].shadow2_lock);
+	if (!makerdonly (spt_index, key)) {
 		STATUS_UPDATE (asm_lock_incl (&stat_pdnew2cnt));
-		spinlock_lock (&current->spt.shadow2_lock);
-		modified_shadow2 (i);
-		spinlock_unlock (&current->spt.shadow2_lock);
+		spinlock_lock (&current->spt_array[spt_index].shadow2_lock);
+		modified_shadow2 (spt_index, i);
+		spinlock_unlock (&current->spt_array[spt_index].shadow2_lock);
 	}
 	return r;
 ret:
-	spinlock_unlock (&current->spt.shadow2_lock);
+	spinlock_unlock (&current->spt_array[spt_index].shadow2_lock);
 	return r;
 }
 
 static bool
-mapsub (pmap_t *pp, u64 *entry, int level, bool clearall)
+mapsub (unsigned int spt_index, pmap_t *pp, u64 *entry, int level, bool clearall)
 {
 	u64 tmp;
 	int l;
 
 	if (clearall) {
-		pmap_setlevel (pp, current->spt.levels);
+		pmap_setlevel (pp, current->spt_array[spt_index].levels);
 		pmap_clear (pp);
-		current->spt.cnt = 0;
+		current->spt_array[spt_index].cnt = 0;
 	}
 	pmap_setlevel (pp, level);
 	tmp = pmap_read (pp);
 	for (; (l = pmap_getreadlevel (pp)) > level; tmp = pmap_read (pp)) {
 		pmap_setlevel (pp, l);
-		if (current->spt.cnt == NUM_OF_SPTTBL)
+		if (current->spt_array[spt_index].cnt == NUM_OF_SPTTBL)
 			return false;
-		pmap_write (pp, current->spt.tbl_phys[current->spt.cnt++] |
+		pmap_write (pp, current->spt_array[spt_index].tbl_phys[current->spt_array[spt_index].cnt++] |
 			    PDE_P_BIT, PDE_P_BIT);
 		pmap_setlevel (pp, l - 1);
 		pmap_clear (pp);
@@ -904,7 +904,7 @@ mapsub (pmap_t *pp, u64 *entry, int level, bool clearall)
 }
 
 static void
-map_page (u64 v, struct map_page_data1 m1, struct map_page_data2 m2[5],
+map_page (unsigned int spt_index, u64 v, struct map_page_data1 m1, struct map_page_data2 m2[5],
 	  u64 gfns[5], int glvl)
 {
 	u64 hphys;
@@ -916,7 +916,7 @@ map_page (u64 v, struct map_page_data1 m1, struct map_page_data2 m2[5],
 	int levels;
 
 	STATUS_UPDATE (asm_lock_incl (&stat_mapcnt));
-	if (!current->spt.wp) {
+	if (!current->spt_array[spt_index].wp) {
 		if (!m1.user && m1.write) {
 			m2[0].us = 0;
 			m2[0].rw = 1;
@@ -950,40 +950,40 @@ map_page (u64 v, struct map_page_data1 m1, struct map_page_data2 m2[5],
 	gfnw = GFN_UNUSED;
 	if (m1.write)
 		gfnw = gfns[0];
-	pmap_open_vmm (&p, current->spt.cr3tbl_phys, current->spt.levels);
+	pmap_open_vmm (&p, current->spt_array[spt_index].cr3tbl_phys, current->spt_array[spt_index].levels);
 	if (key2)
 		levels = 3;
 	else
 		levels = 2;
 	pmap_seek (&p, v, levels);
-	if (!mapsub (&p, &tmp, levels, false)) {
-		if (!mapsub (&p, &tmp, levels, true))
+	if (!mapsub (spt_index, &p, &tmp, levels, false)) {
+		if (!mapsub (spt_index, &p, &tmp, levels, true))
 			panic ("mapsub failed 1");
 	}
 	if (levels == 3) {
-		if (!setpdpe (&p, tmp, key2, gfnw)) {
-			if (!mapsub (&p, &tmp, levels, true))
+		if (!setpdpe (spt_index, &p, tmp, key2, gfnw)) {
+			if (!mapsub (spt_index, &p, &tmp, levels, true))
 				panic ("mapsub failed 2");
-			if (!setpdpe (&p, tmp, key2, gfnw))
+			if (!setpdpe (spt_index, &p, tmp, key2, gfnw))
 				panic ("setpdpe failed 1");
 		}
 		pmap_setlevel (&p, 2);
 		tmp = pmap_read (&p);
-		if (!setpde (&p, tmp, key1, gfnw, m2[1])) {
-			if (!mapsub (&p, &tmp, levels, true))
+		if (!setpde (spt_index, &p, tmp, key1, gfnw, m2[1])) {
+			if (!mapsub (spt_index, &p, &tmp, levels, true))
 				panic ("mapsub failed 3");
-			if (!setpdpe (&p, tmp, key2, gfnw))
+			if (!setpdpe (spt_index, &p, tmp, key2, gfnw))
 				panic ("setpdpe failed 2");
 			pmap_setlevel (&p, 2);
 			tmp = pmap_read (&p);
-			if (!setpde (&p, tmp, key1, gfnw, m2[1]))
+			if (!setpde (spt_index, &p, tmp, key1, gfnw, m2[1]))
 				panic ("setpde failed 1");
 		}		
 	} else {	
-		if (!setpde (&p, tmp, key1, gfnw, m2[1])) {
-			if (!mapsub (&p, &tmp, levels, true))
+		if (!setpde (spt_index, &p, tmp, key1, gfnw, m2[1])) {
+			if (!mapsub (spt_index, &p, &tmp, levels, true))
 				panic ("mapsub failed 4");
-			if (!setpde (&p, tmp, key1, gfnw, m2[1]))
+			if (!setpde (spt_index, &p, tmp, key1, gfnw, m2[1]))
 				panic ("setpde failed 2");
 		}
 	}
@@ -1004,14 +1004,14 @@ map_page (u64 v, struct map_page_data1 m1, struct map_page_data2 m2[5],
 		    PTE_P_BIT | PTE_RW_BIT | PTE_US_BIT |
 		    PTE_PWT_BIT | PTE_PCD_BIT | PTE_PAT_BIT | PTE_D_BIT);
 	if (m2[0].rw) {
-		update_rwmap (gfns[0], pmap_pointer (&p));
-		update_shadow (gfns[0], pmap_pointer (&p), m1.write);
+		update_rwmap (spt_index, gfns[0], pmap_pointer (&p));
+		update_shadow (spt_index, gfns[0], pmap_pointer (&p), m1.write);
 	}
 	pmap_close (&p);
 }
 
 static bool
-extern_mapsearch (struct vcpu *p, phys_t start, phys_t end)
+extern_mapsearch (unsigned int spt_index, struct vcpu *p, phys_t start, phys_t end)
 {
 	u64 *e, tmp, mask = PTE_ADDR_MASK64;
 	unsigned int n = 512;
@@ -1022,10 +1022,10 @@ extern_mapsearch (struct vcpu *p, phys_t start, phys_t end)
 	/* lock is not needed because this is called by mmio_register */
 	/* mmio_register uses another lock to avoid conflict */
 	/* with cpu_mmu_spt_pagefault() */
-	i = p->spt.shadow1_modified;
-	k = p->spt.shadow1_free;
+	i = p->spt_array[spt_index].shadow1_modified;
+	k = p->spt_array[spt_index].shadow1_free;
 	while (i != k) {
-		e = p->spt.shadow1[i].virt;
+		e = p->spt_array[spt_index].shadow1[i].virt;
 		for (j = 0; j < n; j++) {
 			tmp = e[j] & mask;
 			if ((e[j] & PTE_P_BIT) && start <= tmp && tmp <= end)
@@ -1037,88 +1037,88 @@ extern_mapsearch (struct vcpu *p, phys_t start, phys_t end)
 }
 
 static void
-clear_rwmap (void)
+clear_rwmap (unsigned int spt_index)
 {
-	spinlock_lock (&current->spt.rwmap_lock);
-	current->spt.rwmap_fail = 0;
-	current->spt.rwmap_normal = 0;
-	current->spt.rwmap_free = 0;
-	spinlock_unlock (&current->spt.rwmap_lock);
+	spinlock_lock (&current->spt_array[spt_index].rwmap_lock);
+	current->spt_array[spt_index].rwmap_fail = 0;
+	current->spt_array[spt_index].rwmap_normal = 0;
+	current->spt_array[spt_index].rwmap_free = 0;
+	spinlock_unlock (&current->spt_array[spt_index].rwmap_lock);
 }
 
 static void
-clear_shadow1 (void)
+clear_shadow1 (unsigned int spt_index)
 {
 	unsigned int i;
 
-	spinlock_lock (&current->spt.shadow1_lock);
+	spinlock_lock (&current->spt_array[spt_index].shadow1_lock);
 	for (i = 0; i < NUM_OF_SPTSHADOW1; i++)
-		clear_shadow (&current->spt.shadow1[i]);
-	current->spt.shadow1_modified = 0;
-	current->spt.shadow1_normal = 0;
-	current->spt.shadow1_free = 0;
-	spinlock_unlock (&current->spt.shadow1_lock);
+		clear_shadow (&current->spt_array[spt_index].shadow1[i]);
+	current->spt_array[spt_index].shadow1_modified = 0;
+	current->spt_array[spt_index].shadow1_normal = 0;
+	current->spt_array[spt_index].shadow1_free = 0;
+	spinlock_unlock (&current->spt_array[spt_index].shadow1_lock);
 }
 
 static void
-clear_shadow2 (void)
+clear_shadow2 (unsigned int spt_index)
 {
 	unsigned int i;
 
-	spinlock_lock (&current->spt.shadow2_lock);
+	spinlock_lock (&current->spt_array[spt_index].shadow2_lock);
 	for (i = 0; i < NUM_OF_SPTSHADOW2; i++)
-		clear_shadow (&current->spt.shadow2[i]);
-	current->spt.shadow2_modified = 0;
-	current->spt.shadow2_normal = 0;
-	current->spt.shadow2_free = 0;
-	spinlock_unlock (&current->spt.shadow2_lock);
+		clear_shadow (&current->spt_array[spt_index].shadow2[i]);
+	current->spt_array[spt_index].shadow2_modified = 0;
+	current->spt_array[spt_index].shadow2_normal = 0;
+	current->spt_array[spt_index].shadow2_free = 0;
+	spinlock_unlock (&current->spt_array[spt_index].shadow2_lock);
 }
 
 static void
-update_cr3 (void)
+update_cr3 (unsigned int spt_index)
 {
 	pmap_t p;
 	ulong cr0;
 
 	STATUS_UPDATE (asm_lock_incl (&stat_cr3cnt));
 #ifdef CPU_MMU_SPT_USE_PAE
-	current->spt.levels = guest64 () ? 4 : 3;
+	current->spt_array[spt_index].levels = guest64 () ? 4 : 3;
 #else
-	current->spt.levels = 2;
+	current->spt_array[spt_index].levels = 2;
 #endif
-	pmap_open_vmm (&p, current->spt.cr3tbl_phys, current->spt.levels);
+	pmap_open_vmm (&p, current->spt_array[spt_index].cr3tbl_phys, current->spt_array[spt_index].levels);
 	pmap_clear (&p);
 	pmap_close (&p);
-	current->spt.cnt = 0;
-	current->vmctl.spt_setcr3 (current->spt.cr3tbl_phys);
+	current->spt_array[spt_index].cnt = 0;
+	current->vmctl.spt_setcr3 (current->spt_array[spt_index].cr3tbl_phys);
 	current->vmctl.read_control_reg (CONTROL_REG_CR0, &cr0);
-	if (current->spt.wp && !(cr0 & CR0_WP_BIT)) {
-		current->spt.wp = false;
-		clear_rwmap ();
-		clear_shadow1 ();
-		clear_shadow2 ();
+	if (current->spt_array[spt_index].wp && !(cr0 & CR0_WP_BIT)) {
+		current->spt_array[spt_index].wp = false;
+		clear_rwmap (spt_index);
+		clear_shadow1 (spt_index);
+		clear_shadow2 (spt_index);
 		STATUS_UPDATE (asm_lock_incl (&stat_wpcnt));
 	}
-	if (!current->spt.wp && (cr0 & CR0_WP_BIT)) {
-		current->spt.wp = true;
-		clear_rwmap ();
-		clear_shadow1 ();
-		clear_shadow2 ();
+	if (!current->spt_array[spt_index].wp && (cr0 & CR0_WP_BIT)) {
+		current->spt_array[spt_index].wp = true;
+		clear_rwmap (spt_index);
+		clear_shadow1 (spt_index);
+		clear_shadow2 (spt_index);
 		STATUS_UPDATE (asm_lock_incl (&stat_wpcnt));
 	}
-	update_rwmap (0, NULL);
-	spinlock_lock (&current->spt.shadow1_lock);
-	clean_modified_shadow1 (false);
-	spinlock_unlock (&current->spt.shadow1_lock);
-	spinlock_lock (&current->spt.shadow2_lock);
-	clean_modified_shadow2 (true);
-	spinlock_unlock (&current->spt.shadow2_lock);
+	update_rwmap (spt_index, 0, NULL);
+	spinlock_lock (&current->spt_array[spt_index].shadow1_lock);
+	clean_modified_shadow1 (spt_index, spt_index, false);
+	spinlock_unlock (&current->spt_array[spt_index].shadow1_lock);
+	spinlock_lock (&current->spt_array[spt_index].shadow2_lock);
+	clean_modified_shadow2 (spt_index, spt_index, true);
+	spinlock_unlock (&current->spt_array[spt_index].shadow2_lock);
 }
 
 static bool
-spt_tlbflush (void)
+spt_tlbflush (unsigned int spt_index)
 {
-	return update_rwmap (0, NULL);
+	return update_rwmap (spt_index, 0, NULL);
 }
 
 static char *
@@ -1147,7 +1147,8 @@ spt_status (void)
 static void
 init_global (void)
 {
-	LIST1_HEAD_INIT (list1_spt);
+	for(i = 0;i < NUM_OF_SPT;i++)
+		LIST1_HEAD_INIT (list1_spt_array[i]);
 	register_status_callback (spt_status);
 }
 
@@ -1157,36 +1158,36 @@ init_pcpu (void)
 }
 
 static int
-init_vcpu (void)
+init_vcpu (unsigned int spt_index)
 {
 	int i;
 	struct sptlist *listspt;
 
-	alloc_page (&current->spt.cr3tbl, &current->spt.cr3tbl_phys);
+	alloc_page (&current->spt_array[spt_index].cr3tbl, &current->spt_array[spt_index].cr3tbl_phys);
 	for (i = 0; i < NUM_OF_SPTTBL; i++)
-		alloc_page (&current->spt.tbl[i], &current->spt.tbl_phys[i]);
-	current->spt.cnt = 0;
-	memset (current->spt.cr3tbl, 0, PAGESIZE);
+		alloc_page (&current->spt_array[spt_index].tbl[i], &current->spt_array[spt_index].tbl_phys[i]);
+	current->spt_array[spt_index].cnt = 0;
+	memset (current->spt_array[spt_index].cr3tbl, 0, PAGESIZE);
 	for (i = 0; i < NUM_OF_SPTSHADOW1; i++) {
-		alloc_page (&current->spt.shadow1[i].virt,
-			    &current->spt.shadow1[i].phys);
-		current->spt.shadow1[i].cleared = false;
+		alloc_page (&current->spt_array[spt_index].shadow1[i].virt,
+			    &current->spt_array[spt_index].shadow1[i].phys);
+		current->spt_array[spt_index].shadow1[i].cleared = false;
 	}
 	for (i = 0; i < NUM_OF_SPTSHADOW2; i++) {
-		alloc_page (&current->spt.shadow2[i].virt,
-			    &current->spt.shadow2[i].phys);
-		current->spt.shadow2[i].cleared = false;
+		alloc_page (&current->spt_array[spt_index].shadow2[i].virt,
+			    &current->spt_array[spt_index].shadow2[i].phys);
+		current->spt_array[spt_index].shadow2[i].cleared = false;
 	}
-	spinlock_init (&current->spt.rwmap_lock);
-	spinlock_init (&current->spt.shadow1_lock);
-	spinlock_init (&current->spt.shadow2_lock);
-	clear_rwmap ();
-	clear_shadow1 ();
-	clear_shadow2 ();
-	current->spt.wp = false;
+	spinlock_init (&current->spt_array[spt_index].rwmap_lock);
+	spinlock_init (&current->spt_array[spt_index].shadow1_lock);
+	spinlock_init (&current->spt_array[spt_index].shadow2_lock);
+	clear_rwmap (spt_index);
+	clear_shadow1 (spt_index);
+	clear_shadow2 (spt_index);
+	current->spt_array[spt_index].wp = false;
 	listspt = alloc (sizeof *listspt);
-	listspt->spt = &current->spt;
-	LIST1_PUSH (list1_spt, listspt);
+	listspt->spt = &current->spt_array[spt_index];
+	LIST1_PUSH (list1_spt_array[spt_index], listspt);
 	return 0;
 }
 #endif /* CPU_MMU_SPT_2 */
@@ -1218,7 +1219,7 @@ struct sptlist {
 	struct cpu_mmu_spt_data *spt;
 };
 
-static LIST1_DEFINE_HEAD (struct sptlist, list1_spt);
+static LIST1_DEFINE_HEAD (struct sptlist, list1_spt_array[NUM_OF_SPT]);
 
 static u32 stat_mapcnt = 0;
 static u32 stat_cr3cnt = 0;
@@ -1280,46 +1281,46 @@ shadow2_hashm_index (u64 key)
 }
 
 static bool
-update_rwmap (u64 gfn, void *pte)
+update_rwmap (unsigned int spt_index, u64 gfn, void *pte)
 {
 	struct cpu_mmu_spt_rwmap *p;
 	bool r = false;
 
-	spinlock_lock (&current->spt.rwmap_lock);
-	while ((p = LIST2_POP (current->spt.rwmap_fail, rwmap))) {
-		LIST2_DEL (current->spt.rwmap_hash[rwmap_hash_index (p->gfn)],
+	spinlock_lock (&current->spt_array[spt_index].rwmap_lock);
+	while ((p = LIST2_POP (current->spt_array[spt_index].rwmap_fail, rwmap))) {
+		LIST2_DEL (current->spt_array[spt_index].rwmap_hash[rwmap_hash_index (p->gfn)],
 			   hash, p);
 		pte_and (p->pte, ~(PTE_D_BIT | PTE_RW_BIT));
-		LIST2_PUSH (current->spt.rwmap_free, rwmap, p);
+		LIST2_PUSH (current->spt_array[spt_index].rwmap_free, rwmap, p);
 		r = true;
 	}
 	if (pte != NULL) {
-		LIST2_FOREACH (current->spt.rwmap_hash[rwmap_hash_index (gfn)],
+		LIST2_FOREACH (current->spt_array[spt_index].rwmap_hash[rwmap_hash_index (gfn)],
 			       hash, p) {
 			if (p->gfn == gfn && p->pte == pte)
 				goto skip;
 		}
-		p = LIST2_POP (current->spt.rwmap_free, rwmap);
+		p = LIST2_POP (current->spt_array[spt_index].rwmap_free, rwmap);
 		if (p == NULL) {
-			p = LIST2_POP (current->spt.rwmap_normal, rwmap);
-			LIST2_DEL (current->spt.rwmap_hash
+			p = LIST2_POP (current->spt_array[spt_index].rwmap_normal, rwmap);
+			LIST2_DEL (current->spt_array[spt_index].rwmap_hash
 				   [rwmap_hash_index (p->gfn)], hash, p);
 			pte_and (p->pte, ~(PTE_D_BIT | PTE_RW_BIT));
 		}
 		p->gfn = gfn;
 		p->pte = pte;
 		p->fail = false;
-		LIST2_ADD (current->spt.rwmap_normal, rwmap, p);
-		LIST2_ADD (current->spt.rwmap_hash[rwmap_hash_index (gfn)],
+		LIST2_ADD (current->spt_array[spt_index].rwmap_normal, rwmap, p);
+		LIST2_ADD (current->spt_array[spt_index].rwmap_hash[rwmap_hash_index (gfn)],
 			   hash, p);
 	}
 skip:
-	spinlock_unlock (&current->spt.rwmap_lock);
+	spinlock_unlock (&current->spt_array[spt_index].rwmap_lock);
 	return r;
 }
 
 static void
-update_shadow (u64 gfn0, u64 *pte, bool needrw)
+update_shadow (unsigned int spt_index, u64 gfn0, u64 *pte, bool needrw)
 {
 	struct cpu_mmu_spt_data *spt;
 	struct sptlist *listspt;
@@ -1329,7 +1330,7 @@ update_shadow (u64 gfn0, u64 *pte, bool needrw)
 	unsigned int hn, hm;
 
 	key = gfn0 << KEY_GFN_SHIFT;
-	LIST1_FOREACH (list1_spt, listspt) {
+	LIST1_FOREACH (list1_spt_array[spt_index], listspt) {
 		spt = listspt->spt;
 		spinlock_lock (&spt->shadow1_lock);
 		hn = shadow1_hashn_index (key);
@@ -1398,7 +1399,7 @@ update_clearinfo (struct cpu_mmu_spt_shadow *shadow, unsigned int off)
 }
 
 static bool
-is_shadow1_pde_ok (u64 pde, u64 key, u64 v)
+is_shadow1_pde_ok (unsigned int spt_index, u64 pde, u64 key, u64 v)
 {
 	u64 phys;
 	struct cpu_mmu_spt_shadow *p;
@@ -1407,7 +1408,7 @@ is_shadow1_pde_ok (u64 pde, u64 key, u64 v)
 	phys = pde & PDE_ADDR_MASK64;
 	hn = shadow1_hashn_index (key);
 	hm = shadow1_hashm_index (key);
-	LIST2_FOREACH (current->spt.shadow1_hashm[hm], hash, p) {
+	LIST2_FOREACH (current->spt_array[spt_index].shadow1_hashm[hm], hash, p) {
 		if (key == (p->key & KEY_CMPMASK) && phys == p->phys) {
 			if (p->clear_n == 0)
 				return false;
@@ -1415,10 +1416,10 @@ is_shadow1_pde_ok (u64 pde, u64 key, u64 v)
 			return true;
 		}
 	}
-	LIST2_FOREACH (current->spt.shadow1_hashn[hn], hash, p) {
+	LIST2_FOREACH (current->spt_array[spt_index].shadow1_hashn[hn], hash, p) {
 		if (key == (p->key & KEY_CMPMASK) && phys == p->phys) {
-			LIST2_DEL (current->spt.shadow1_normal, shadow, p);
-			LIST2_ADD (current->spt.shadow1_normal, shadow, p);
+			LIST2_DEL (current->spt_array[spt_index].shadow1_normal, shadow, p);
+			LIST2_ADD (current->spt_array[spt_index].shadow1_normal, shadow, p);
 			update_clearinfo (p, CLEARINFO1 (v));
 			return true;
 		}
@@ -1427,7 +1428,7 @@ is_shadow1_pde_ok (u64 pde, u64 key, u64 v)
 }
 
 static bool
-is_shadow2_pdpe_ok (u64 pdpe, u64 key, u64 v)
+is_shadow2_pdpe_ok (unsigned int spt_index, u64 pdpe, u64 key, u64 v)
 {
 	u64 phys;
 	struct cpu_mmu_spt_shadow *p;
@@ -1436,7 +1437,7 @@ is_shadow2_pdpe_ok (u64 pdpe, u64 key, u64 v)
 	phys = pdpe & PDE_ADDR_MASK64;
 	hn = shadow2_hashn_index (key);
 	hm = shadow2_hashm_index (key);
-	LIST2_FOREACH (current->spt.shadow2_hashm[hm], hash, p) {
+	LIST2_FOREACH (current->spt_array[spt_index].shadow2_hashm[hm], hash, p) {
 		if (key == (p->key & KEY_CMPMASK) && phys == p->phys) {
 			if (p->clear_n == 0)
 				return false;
@@ -1444,10 +1445,10 @@ is_shadow2_pdpe_ok (u64 pdpe, u64 key, u64 v)
 			return true;
 		}
 	}
-	LIST2_FOREACH (current->spt.shadow2_hashn[hn], hash, p) {
+	LIST2_FOREACH (current->spt_array[spt_index].shadow2_hashn[hn], hash, p) {
 		if (key == (p->key & KEY_CMPMASK) && phys == p->phys) {
-			LIST2_DEL (current->spt.shadow2_normal, shadow, p);
-			LIST2_ADD (current->spt.shadow2_normal, shadow, p);
+			LIST2_DEL (current->spt_array[spt_index].shadow2_normal, shadow, p);
+			LIST2_ADD (current->spt_array[spt_index].shadow2_normal, shadow, p);
 			update_clearinfo (p, CLEARINFO2 (v));
 			return true;
 		}
@@ -1456,40 +1457,40 @@ is_shadow2_pdpe_ok (u64 pdpe, u64 key, u64 v)
 }
 
 static u64
-find_shadow1 (u64 key, u64 v)
+find_shadow1 (unsigned int spt_index, u64 key, u64 v)
 {
 	struct cpu_mmu_spt_shadow *p;
 	unsigned int hn;
 
 	hn = shadow1_hashn_index (key);
-	LIST2_FOREACH (current->spt.shadow1_hashn[hn], hash, p) {
+	LIST2_FOREACH (current->spt_array[spt_index].shadow1_hashn[hn], hash, p) {
 		if (key == (p->key & KEY_CMPMASK))
 			goto found;
 	}
 	return 0;
 found:
-	LIST2_DEL (current->spt.shadow1_normal, shadow, p);
-	LIST2_ADD (current->spt.shadow1_normal, shadow, p);
+	LIST2_DEL (current->spt_array[spt_index].shadow1_normal, shadow, p);
+	LIST2_ADD (current->spt_array[spt_index].shadow1_normal, shadow, p);
 	update_clearinfo (p, CLEARINFO1 (v));
 	return p->phys | PDE_P_BIT |
 		((key & KEY_LARGEPAGE) ? PDE_AVAILABLE1_BIT : 0);
 }
 
 static u64
-find_shadow2 (u64 key, u64 v)
+find_shadow2 (unsigned int spt_index, u64 key, u64 v)
 {
 	struct cpu_mmu_spt_shadow *p;
 	unsigned int hn;
 
 	hn = shadow2_hashn_index (key);
-	LIST2_FOREACH (current->spt.shadow2_hashn[hn], hash, p) {
+	LIST2_FOREACH (current->spt_array[spt_index].shadow2_hashn[hn], hash, p) {
 		if (key == (p->key & KEY_CMPMASK))
 			goto found;
 	}
 	return 0;
 found:
-	LIST2_DEL (current->spt.shadow2_normal, shadow, p);
-	LIST2_ADD (current->spt.shadow2_normal, shadow, p);
+	LIST2_DEL (current->spt_array[spt_index].shadow2_normal, shadow, p);
+	LIST2_ADD (current->spt_array[spt_index].shadow2_normal, shadow, p);
 	update_clearinfo (p, CLEARINFO2 (v));
 	return p->phys | PDE_P_BIT;
 }
@@ -1542,89 +1543,89 @@ clear_shadow (struct cpu_mmu_spt_shadow *shadow)
 }
 
 static void
-clean_modified_shadow2 (bool freeflag)
+clean_modified_shadow2 (unsigned int spt_index, bool freeflag)
 {
 	struct cpu_mmu_spt_shadow *p, *n;
 	unsigned int hm;
 
-	LIST2_FOREACH_DELETABLE (current->spt.shadow2_modified, shadow, p, n) {
+	LIST2_FOREACH_DELETABLE (current->spt_array[spt_index].shadow2_modified, shadow, p, n) {
 		clear_shadow (p);
 		if (freeflag) {
-			LIST2_DEL (current->spt.shadow2_modified, shadow, p);
-			LIST2_PUSH (current->spt.shadow2_free, shadow, p);
+			LIST2_DEL (current->spt_array[spt_index].shadow2_modified, shadow, p);
+			LIST2_PUSH (current->spt_array[spt_index].shadow2_free, shadow, p);
 			hm = shadow2_hashm_index (p->key);
-			LIST2_DEL (current->spt.shadow2_hashm[hm], hash, p);
+			LIST2_DEL (current->spt_array[spt_index].shadow2_hashm[hm], hash, p);
 		}
 	}
 }
 
 static void
-clean_modified_shadow1 (bool freeflag)
+clean_modified_shadow1 (unsigned int spt_index, bool freeflag)
 {
 	struct cpu_mmu_spt_shadow *p;
 	unsigned int hm;
 
 	if (freeflag) {
-		p = LIST2_POP (current->spt.shadow1_modified, shadow);
+		p = LIST2_POP (current->spt_array[spt_index].shadow1_modified, shadow);
 		if (p == NULL)
 			return;
 		do {
 			clear_shadow (p);
-			LIST2_PUSH (current->spt.shadow1_free, shadow, p);
+			LIST2_PUSH (current->spt_array[spt_index].shadow1_free, shadow, p);
 			hm = shadow1_hashm_index (p->key);
-			LIST2_DEL (current->spt.shadow1_hashm[hm], hash, p);
-			p = LIST2_POP (current->spt.shadow1_modified, shadow);
+			LIST2_DEL (current->spt_array[spt_index].shadow1_hashm[hm], hash, p);
+			p = LIST2_POP (current->spt_array[spt_index].shadow1_modified, shadow);
 		} while (p);
 		/* FIXME: heavy */
-		spinlock_lock (&current->spt.shadow2_lock);
-		LIST2_FOREACH (current->spt.shadow2_modified, shadow, p)
+		spinlock_lock (&current->spt_array[spt_index].shadow2_lock);
+		LIST2_FOREACH (current->spt_array[spt_index].shadow2_modified, shadow, p)
 			clear_shadow (p);
-		LIST2_FOREACH (current->spt.shadow2_normal, shadow, p)
+		LIST2_FOREACH (current->spt_array[spt_index].shadow2_normal, shadow, p)
 			clear_shadow (p);
-		spinlock_unlock (&current->spt.shadow2_lock);
+		spinlock_unlock (&current->spt_array[spt_index].shadow2_lock);
 	} else {
-		LIST2_FOREACH (current->spt.shadow1_modified, shadow, p)
+		LIST2_FOREACH (current->spt_array[spt_index].shadow1_modified, shadow, p)
 			clear_shadow (p);
 	}
 }
 
 static bool
-new_shadow1 (u64 key, u64 v, u64 *pde, struct cpu_mmu_spt_shadow **ii)
+new_shadow1 (unsigned int spt_index, u64 key, u64 v, u64 *pde, struct cpu_mmu_spt_shadow **ii)
 {
 	struct cpu_mmu_spt_shadow *p;
 	unsigned int hn, hm, hn2, hm2;
 
 	hn = shadow1_hashn_index (key);
 	hm = shadow1_hashm_index (key);
-	LIST2_FOREACH (current->spt.shadow1_hashm[hm], hash, p) {
+	LIST2_FOREACH (current->spt_array[spt_index].shadow1_hashm[hm], hash, p) {
 		if (key == (p->key & KEY_CMPMASK)) {
 			clear_shadow (p);
-			LIST2_DEL (current->spt.shadow1_modified, shadow, p);
-			LIST2_DEL (current->spt.shadow1_hashm[hm], hash, p);
+			LIST2_DEL (current->spt_array[spt_index].shadow1_modified, shadow, p);
+			LIST2_DEL (current->spt_array[spt_index].shadow1_hashm[hm], hash, p);
 			STATUS_UPDATE (asm_lock_incl (&stat_ptfoundcnt));
 			goto found;
 		}
 	}
-	p = LIST2_POP (current->spt.shadow1_free, shadow);
+	p = LIST2_POP (current->spt_array[spt_index].shadow1_free, shadow);
 	if (p == NULL) {
-		p = LIST2_POP (current->spt.shadow1_normal, shadow);
+		p = LIST2_POP (current->spt_array[spt_index].shadow1_normal, shadow);
 		if (p) {
 			hn2 = shadow1_hashn_index (p->key);
 			hm2 = shadow1_hashm_index (p->key);
-			LIST2_ADD (current->spt.shadow1_modified, shadow, p);
-			LIST2_DEL (current->spt.shadow1_hashn[hn2], hash, p);
-			LIST2_ADD (current->spt.shadow1_hashm[hm2], hash, p);
+			LIST2_ADD (current->spt_array[spt_index].shadow1_modified, shadow, p);
+			LIST2_DEL (current->spt_array[spt_index].shadow1_hashn[hn2], hash, p);
+			LIST2_ADD (current->spt_array[spt_index].shadow1_hashm[hm2], hash, p);
 			p->key |= KEY_MODIFIED;
 		}
-		clean_modified_shadow1 (true);
+		clean_modified_shadow1 (spt_index, true);
 		STATUS_UPDATE (asm_lock_incl (&stat_ptfullcnt));
 		return false;
 	}
 	STATUS_UPDATE (asm_lock_incl (&stat_ptnewcnt));
 	p->key = key;
 found:
-	LIST2_ADD (current->spt.shadow1_normal, shadow, p);
-	LIST2_ADD (current->spt.shadow1_hashn[hn], hash, p);
+	LIST2_ADD (current->spt_array[spt_index].shadow1_normal, shadow, p);
+	LIST2_ADD (current->spt_array[spt_index].shadow1_hashn[hn], hash, p);
 	p->key &= ~KEY_MODIFIED;
 	update_clearinfo (p, CLEARINFO1 (v));
 	*pde = p->phys | PDE_P_BIT |
@@ -1634,42 +1635,42 @@ found:
 }
 
 static bool
-new_shadow2 (u64 key, u64 v, u64 *pde, struct cpu_mmu_spt_shadow **ii)
+new_shadow2 (unsigned int spt_index, u64 key, u64 v, u64 *pde, struct cpu_mmu_spt_shadow **ii)
 {
 	struct cpu_mmu_spt_shadow *p;
 	unsigned int hn, hm, hn2, hm2;
 
 	hn = shadow2_hashn_index (key);
 	hm = shadow2_hashm_index (key);
-	LIST2_FOREACH (current->spt.shadow2_hashm[hm], hash, p) {
+	LIST2_FOREACH (current->spt_array[spt_index].shadow2_hashm[hm], hash, p) {
 		if (key == (p->key & KEY_CMPMASK)) {
 			clear_shadow (p);
-			LIST2_DEL (current->spt.shadow2_modified, shadow, p);
-			LIST2_DEL (current->spt.shadow2_hashm[hm], hash, p);
+			LIST2_DEL (current->spt_array[spt_index].shadow2_modified, shadow, p);
+			LIST2_DEL (current->spt_array[spt_index].shadow2_hashm[hm], hash, p);
 			STATUS_UPDATE (asm_lock_incl (&stat_pdfoundcnt));
 			goto found;
 		}
 	}
-	p = LIST2_POP (current->spt.shadow2_free, shadow);
+	p = LIST2_POP (current->spt_array[spt_index].shadow2_free, shadow);
 	if (p == NULL) {
-		p = LIST2_POP (current->spt.shadow2_normal, shadow);
+		p = LIST2_POP (current->spt_array[spt_index].shadow2_normal, shadow);
 		if (p) {
 			hn2 = shadow2_hashn_index (p->key);
 			hm2 = shadow2_hashm_index (p->key);
-			LIST2_ADD (current->spt.shadow2_modified, shadow, p);
-			LIST2_DEL (current->spt.shadow2_hashn[hn2], hash, p);
-			LIST2_ADD (current->spt.shadow2_hashm[hm2], hash, p);
+			LIST2_ADD (current->spt_array[spt_index].shadow2_modified, shadow, p);
+			LIST2_DEL (current->spt_array[spt_index].shadow2_hashn[hn2], hash, p);
+			LIST2_ADD (current->spt_array[spt_index].shadow2_hashm[hm2], hash, p);
 			p->key |= KEY_MODIFIED;
 		}
-		clean_modified_shadow2 (true);
+		clean_modified_shadow2 (spt_index, true);
 		STATUS_UPDATE (asm_lock_incl (&stat_pdfullcnt));
 		return false;
 	}
 	STATUS_UPDATE (asm_lock_incl (&stat_pdnewcnt));
 	p->key = key;
 found:
-	LIST2_ADD (current->spt.shadow2_normal, shadow, p);
-	LIST2_ADD (current->spt.shadow2_hashn[hn], hash, p);
+	LIST2_ADD (current->spt_array[spt_index].shadow2_normal, shadow, p);
+	LIST2_ADD (current->spt_array[spt_index].shadow2_hashn[hn], hash, p);
 	p->key &= ~KEY_MODIFIED;
 	update_clearinfo (p, CLEARINFO2 (v));
 	*pde = p->phys | PDE_P_BIT;
@@ -1678,7 +1679,7 @@ found:
 }
 
 static bool
-makerdonly (u64 key)
+makerdonly (unsigned int spt_index, u64 key)
 {
 	struct cpu_mmu_spt_data *spt;
 	struct sptlist *listspt;
@@ -1689,7 +1690,7 @@ makerdonly (u64 key)
 	if (key & KEY_LARGEPAGE)
 		return true;
 	gfn = key >> KEY_GFN_SHIFT;
-	LIST1_FOREACH (list1_spt, listspt) {
+	LIST1_FOREACH (list1_spt_array[spt_index], listspt) {
 		spt = listspt->spt;
 		spinlock_lock (&spt->rwmap_lock);
 		LIST2_FOREACH_DELETABLE (spt->rwmap_hash[rwmap_hash_index
@@ -1703,7 +1704,7 @@ makerdonly (u64 key)
 			}
 			newpte = pte_and (p->pte, ~PTE_RW_BIT);
 			if (newpte & PTE_D_BIT) {
-				if (spt == &current->spt) {
+				if (spt == &current->spt_array[spt_index]) {
 					pte_and (p->pte, ~PTE_D_BIT);
 				} else {
 					r = false;
@@ -1721,39 +1722,39 @@ makerdonly (u64 key)
 }
 
 static void
-modified_shadow1 (struct cpu_mmu_spt_shadow *p)
+modified_shadow1 (unsigned int spt_index, struct cpu_mmu_spt_shadow *p)
 {
 	unsigned int hn, hm;
 
 	if (!(p->key & KEY_MODIFIED)) {
 		hn = shadow1_hashn_index (p->key);
 		hm = shadow1_hashm_index (p->key);
-		LIST2_DEL (current->spt.shadow1_normal, shadow, p);
-		LIST2_ADD (current->spt.shadow1_modified, shadow, p);
-		LIST2_DEL (current->spt.shadow1_hashn[hn], hash, p);
-		LIST2_ADD (current->spt.shadow1_hashm[hm], hash, p);
+		LIST2_DEL (current->spt_array[spt_index].shadow1_normal, shadow, p);
+		LIST2_ADD (current->spt_array[spt_index].shadow1_modified, shadow, p);
+		LIST2_DEL (current->spt_array[spt_index].shadow1_hashn[hn], hash, p);
+		LIST2_ADD (current->spt_array[spt_index].shadow1_hashm[hm], hash, p);
 		p->key |= KEY_MODIFIED;
 	}
 }
 
 static void
-modified_shadow2 (struct cpu_mmu_spt_shadow *p)
+modified_shadow2 (unsigned int spt_index, struct cpu_mmu_spt_shadow *p)
 {
 	unsigned int hn, hm;
 
 	if (!(p->key & KEY_MODIFIED)) {
 		hn = shadow2_hashn_index (p->key);
 		hm = shadow2_hashm_index (p->key);
-		LIST2_DEL (current->spt.shadow2_normal, shadow, p);
-		LIST2_ADD (current->spt.shadow2_modified, shadow, p);
-		LIST2_DEL (current->spt.shadow2_hashn[hn], hash, p);
-		LIST2_ADD (current->spt.shadow2_hashm[hm], hash, p);
+		LIST2_DEL (current->spt_array[spt_index].shadow2_normal, shadow, p);
+		LIST2_ADD (current->spt_array[spt_index].shadow2_modified, shadow, p);
+		LIST2_DEL (current->spt_array[spt_index].shadow2_hashn[hn], hash, p);
+		LIST2_ADD (current->spt_array[spt_index].shadow2_hashm[hm], hash, p);
 		p->key |= KEY_MODIFIED;
 	}
 }
 
 static bool
-setpde (pmap_t *p, u64 pde, u64 key, u64 gfnw, u64 v, struct map_page_data2 m)
+setpde (unsigned int spt_index, pmap_t *p, u64 pde, u64 key, u64 gfnw, u64 v, struct map_page_data2 m)
 {
 	bool r = true;
 	struct cpu_mmu_spt_shadow *i;
@@ -1763,102 +1764,102 @@ setpde (pmap_t *p, u64 pde, u64 key, u64 gfnw, u64 v, struct map_page_data2 m)
 		(m.us ? PDE_US_BIT : 0) |
 		(m.nx ? PDE_NX_BIT : 0);
 	u = PDE_AVAILABLE1_BIT | PDE_P_BIT;
-	spinlock_lock (&current->spt.shadow1_lock);
+	spinlock_lock (&current->spt_array[spt_index].shadow1_lock);
 	if (pde) {
-		if (is_shadow1_pde_ok (pde, key, v)) {
+		if (is_shadow1_pde_ok (spt_index, pde, key, v)) {
 			pmap_write (p, pde | pdeflags, u);
 			STATUS_UPDATE (asm_lock_incl (&stat_ptgoodcnt));
 			goto ret;
 		}
 	}
-	pde = find_shadow1 (key, v);
+	pde = find_shadow1 (spt_index, key, v);
 	if (pde) {
 		pmap_write (p, pde | pdeflags, u);
 		STATUS_UPDATE (asm_lock_incl (&stat_pthitcnt));
 		goto ret;
 	}
-	r = new_shadow1 (key, v, &pde, &i);
+	r = new_shadow1 (spt_index, key, v, &pde, &i);
 	if (!r)
 		goto ret;
 	pmap_write (p, pde | pdeflags, u);
 	if (gfnw != GFN_UNUSED && !(key & KEY_LARGEPAGE) &&
 	    gfnw == (key >> KEY_GFN_SHIFT)) {
-		modified_shadow1 (i);
+		modified_shadow1 (spt_index, i);
 		goto ret;
 	}
-	spinlock_unlock (&current->spt.shadow1_lock);
-	if (!makerdonly (key)) {
+	spinlock_unlock (&current->spt_array[spt_index].shadow1_lock);
+	if (!makerdonly (spt_index, key)) {
 		STATUS_UPDATE (asm_lock_incl (&stat_ptnew2cnt));
-		spinlock_lock (&current->spt.shadow1_lock);
-		modified_shadow1 (i);
-		spinlock_unlock (&current->spt.shadow1_lock);
+		spinlock_lock (&current->spt_array[spt_index].shadow1_lock);
+		modified_shadow1 (spt_index, i);
+		spinlock_unlock (&current->spt_array[spt_index].shadow1_lock);
 	}
 	return r;
 ret:
-	spinlock_unlock (&current->spt.shadow1_lock);
+	spinlock_unlock (&current->spt_array[spt_index].shadow1_lock);
 	return r;
 }
 
 static bool
-setpdpe (pmap_t *p, u64 pdpe, u64 key, u64 gfnw, u64 v)
+setpdpe (unsigned int spt_index, pmap_t *p, u64 pdpe, u64 key, u64 gfnw, u64 v)
 {
 	bool r = true;
 	struct cpu_mmu_spt_shadow *i;
 
-	spinlock_lock (&current->spt.shadow2_lock);
+	spinlock_lock (&current->spt_array[spt_index].shadow2_lock);
 	if (pdpe) {
-		if (is_shadow2_pdpe_ok (pdpe, key, v)) {
+		if (is_shadow2_pdpe_ok (spt_index, pdpe, key, v)) {
 			pmap_write (p, pdpe, PDE_P_BIT);
 			STATUS_UPDATE (asm_lock_incl (&stat_pdgoodcnt));
 			goto ret;
 		}
 	}
-	pdpe = find_shadow2 (key, v);
+	pdpe = find_shadow2 (spt_index, key, v);
 	if (pdpe) {
 		pmap_write (p, pdpe, PDE_P_BIT);
 		STATUS_UPDATE (asm_lock_incl (&stat_pdhitcnt));
 		goto ret;
 	}
-	r = new_shadow2 (key, v, &pdpe, &i);
+	r = new_shadow2 (spt_index, key, v, &pdpe, &i);
 	if (!r)
 		goto ret;
 	pmap_write (p, pdpe, PDE_P_BIT);
 	if (gfnw != GFN_UNUSED && !(key & KEY_LARGEPAGE) &&
 	    gfnw == (key >> KEY_GFN_SHIFT)) {
-		modified_shadow2 (i);
+		modified_shadow2 (spt_index, i);
 		goto ret;
 	}
-	spinlock_unlock (&current->spt.shadow2_lock);
-	if (!makerdonly (key)) {
+	spinlock_unlock (&current->spt_array[spt_index].shadow2_lock);
+	if (!makerdonly (spt_index, key)) {
 		STATUS_UPDATE (asm_lock_incl (&stat_pdnew2cnt));
-		spinlock_lock (&current->spt.shadow2_lock);
-		modified_shadow2 (i);
-		spinlock_unlock (&current->spt.shadow2_lock);
+		spinlock_lock (&current->spt_array[spt_index].shadow2_lock);
+		modified_shadow2 (spt_index, i);
+		spinlock_unlock (&current->spt_array[spt_index].shadow2_lock);
 	}
 	return r;
 ret:
-	spinlock_unlock (&current->spt.shadow2_lock);
+	spinlock_unlock (&current->spt_array[spt_index].shadow2_lock);
 	return r;
 }
 
 static bool
-mapsub (pmap_t *pp, u64 *entry, int level, bool clearall)
+mapsub (unsigned int spt_index, pmap_t *pp, u64 *entry, int level, bool clearall)
 {
 	u64 tmp;
 	int l;
 
 	if (clearall) {
-		pmap_setlevel (pp, current->spt.levels);
+		pmap_setlevel (pp, current->spt_array[spt_index].levels);
 		pmap_clear (pp);
-		current->spt.cnt = 0;
+		current->spt_array[spt_index].cnt = 0;
 	}
 	pmap_setlevel (pp, level);
 	tmp = pmap_read (pp);
 	for (; (l = pmap_getreadlevel (pp)) > level; tmp = pmap_read (pp)) {
 		pmap_setlevel (pp, l);
-		if (current->spt.cnt == NUM_OF_SPTTBL)
+		if (current->spt_array[spt_index].cnt == NUM_OF_SPTTBL)
 			return false;
-		pmap_write (pp, current->spt.tbl_phys[current->spt.cnt++] |
+		pmap_write (pp, current->spt_array[spt_index].tbl_phys[current->spt_array[spt_index].cnt++] |
 			    PDE_P_BIT, PDE_P_BIT);
 		pmap_setlevel (pp, l - 1);
 		pmap_clear (pp);
@@ -1869,7 +1870,7 @@ mapsub (pmap_t *pp, u64 *entry, int level, bool clearall)
 }
 
 static void
-map_page (u64 v, struct map_page_data1 m1, struct map_page_data2 m2[5],
+map_page (unsigned int spt_index, u64 v, struct map_page_data1 m1, struct map_page_data2 m2[5],
 	  u64 gfns[5], int glvl)
 {
 	u64 hphys;
@@ -1881,7 +1882,7 @@ map_page (u64 v, struct map_page_data1 m1, struct map_page_data2 m2[5],
 	const int levels = 3;
 
 	STATUS_UPDATE (asm_lock_incl (&stat_mapcnt));
-	if (!current->spt.wp) {
+	if (!current->spt_array[spt_index].wp) {
 		if (!m1.user && m1.write) {
 			m2[0].us = 0;
 			m2[0].rw = 1;
@@ -1917,28 +1918,28 @@ map_page (u64 v, struct map_page_data1 m1, struct map_page_data2 m2[5],
 	gfnw = GFN_UNUSED;
 	if (m1.write)
 		gfnw = gfns[0];
-	pmap_open_vmm (&p, current->spt.cr3tbl_phys, current->spt.levels);
+	pmap_open_vmm (&p, current->spt_array[spt_index].cr3tbl_phys, current->spt_array[spt_index].levels);
 	pmap_seek (&p, v, levels);
-	if (!mapsub (&p, &tmp, levels, false)) {
-		if (!mapsub (&p, &tmp, levels, true))
+	if (!mapsub (spt_index, &p, &tmp, levels, false)) {
+		if (!mapsub (spt_index, &p, &tmp, levels, true))
 			panic ("mapsub failed 1");
 	}
-	if (!setpdpe (&p, tmp, key2, gfnw, v)) {
-		if (!mapsub (&p, &tmp, levels, true))
+	if (!setpdpe (spt_index, &p, tmp, key2, gfnw, v)) {
+		if (!mapsub (spt_index, &p, &tmp, levels, true))
 			panic ("mapsub failed 2");
-		if (!setpdpe (&p, tmp, key2, gfnw, v))
+		if (!setpdpe (spt_index, &p, tmp, key2, gfnw, v))
 			panic ("setpdpe failed 1");
 	}
 	pmap_setlevel (&p, 2);
 	tmp = pmap_read (&p);
-	if (!setpde (&p, tmp, key1, gfnw, v, m2[1])) {
-		if (!mapsub (&p, &tmp, levels, true))
+	if (!setpde (spt_index, &p, tmp, key1, gfnw, v, m2[1])) {
+		if (!mapsub (spt_index, &p, &tmp, levels, true))
 			panic ("mapsub failed 3");
-		if (!setpdpe (&p, tmp, key2, gfnw, v))
+		if (!setpdpe (spt_index, &p, tmp, key2, gfnw, v))
 			panic ("setpdpe failed 2");
 		pmap_setlevel (&p, 2);
 		tmp = pmap_read (&p);
-		if (!setpde (&p, tmp, key1, gfnw, v, m2[1]))
+		if (!setpde (spt_index, &p, tmp, key1, gfnw, v, m2[1]))
 			panic ("setpde failed 1");
 	}		
 	pmap_setlevel (&p, 1);
@@ -1959,14 +1960,14 @@ map_page (u64 v, struct map_page_data1 m1, struct map_page_data2 m2[5],
 		    PTE_P_BIT | PTE_RW_BIT | PTE_US_BIT |
 		    PTE_PWT_BIT | PTE_PCD_BIT | PTE_PAT_BIT | PTE_D_BIT);
 	if (m2[0].rw) {
-		update_rwmap (gfns[0], pmap_pointer (&p));
-		update_shadow (gfns[0], pmap_pointer (&p), m1.write);
+		update_rwmap (spt_index, gfns[0], pmap_pointer (&p));
+		update_shadow (spt_index, gfns[0], pmap_pointer (&p), m1.write);
 	}
 	pmap_close (&p);
 }
 
 static bool
-extern_mapsearch (struct vcpu *p, phys_t start, phys_t end)
+extern_mapsearch (unsigned int spt_index, struct vcpu *p, phys_t start, phys_t end)
 {
 	struct cpu_mmu_spt_shadow *q;
 	u64 *e, tmp, mask = PTE_ADDR_MASK64;
@@ -1978,7 +1979,7 @@ extern_mapsearch (struct vcpu *p, phys_t start, phys_t end)
 	/* lock is not needed because this is called by mmio_register */
 	/* mmio_register uses another lock to avoid conflict */
 	/* with cpu_mmu_spt_pagefault() */
-	LIST2_FOREACH (p->spt.shadow1_modified, shadow, q) {
+	LIST2_FOREACH (p->spt_array[spt_index].shadow1_modified, shadow, q) {
 		e = (u64 *)phys_to_virt (q->phys);
 		for (j = 0; j < n; j++) {
 			tmp = e[j] & mask;
@@ -1986,7 +1987,7 @@ extern_mapsearch (struct vcpu *p, phys_t start, phys_t end)
 				return true;
 		}
 	}
-	LIST2_FOREACH (p->spt.shadow1_normal, shadow, q) {
+	LIST2_FOREACH (p->spt_array[spt_index].shadow1_normal, shadow, q) {
 		e = (u64 *)phys_to_virt (q->phys);
 		for (j = 0; j < n; j++) {
 			tmp = e[j] & mask;
@@ -1998,89 +1999,89 @@ extern_mapsearch (struct vcpu *p, phys_t start, phys_t end)
 }
 
 static void
-clear_rwmap (void)
+clear_rwmap (unsigned int spt_index)
 {
 	int i;
 
-	spinlock_lock (&current->spt.rwmap_lock);
-	LIST2_HEAD_INIT (current->spt.rwmap_fail, rwmap);
-	LIST2_HEAD_INIT (current->spt.rwmap_normal, rwmap);
-	LIST2_HEAD_INIT (current->spt.rwmap_free, rwmap);
+	spinlock_lock (&current->spt_array[spt_index].rwmap_lock);
+	LIST2_HEAD_INIT (current->spt_array[spt_index].rwmap_fail, rwmap);
+	LIST2_HEAD_INIT (current->spt_array[spt_index].rwmap_normal, rwmap);
+	LIST2_HEAD_INIT (current->spt_array[spt_index].rwmap_free, rwmap);
 	for (i = 0; i < NUM_OF_SPTRWMAP; i++)
-		LIST2_ADD (current->spt.rwmap_free, rwmap,
-			   &current->spt.rwmap[i]);
+		LIST2_ADD (current->spt_array[spt_index].rwmap_free, rwmap,
+			   &current->spt_array[spt_index].rwmap[i]);
 	for (i = 0; i < HASHSIZE_OF_SPTRWMAP; i++)
-		LIST2_HEAD_INIT (current->spt.rwmap_hash[i], hash);
-	spinlock_unlock (&current->spt.rwmap_lock);
+		LIST2_HEAD_INIT (current->spt_array[spt_index].rwmap_hash[i], hash);
+	spinlock_unlock (&current->spt_array[spt_index].rwmap_lock);
 }
 
 static void
-clear_shadow1 (void)
+clear_shadow1 (unsigned int spt_index)
 {
 	unsigned int i;
 
-	spinlock_lock (&current->spt.shadow1_lock);
-	LIST2_HEAD_INIT (current->spt.shadow1_modified, shadow);
-	LIST2_HEAD_INIT (current->spt.shadow1_normal, shadow);
-	LIST2_HEAD_INIT (current->spt.shadow1_free, shadow);
+	spinlock_lock (&current->spt_array[spt_index].shadow1_lock);
+	LIST2_HEAD_INIT (current->spt_array[spt_index].shadow1_modified, shadow);
+	LIST2_HEAD_INIT (current->spt_array[spt_index].shadow1_normal, shadow);
+	LIST2_HEAD_INIT (current->spt_array[spt_index].shadow1_free, shadow);
 	for (i = 0; i < NUM_OF_SPTSHADOW1; i++) {
-		clear_shadow (&current->spt.shadow1[i]);
-		LIST2_ADD (current->spt.shadow1_free, shadow,
-			   &current->spt.shadow1[i]);
+		clear_shadow (&current->spt_array[spt_index].shadow1[i]);
+		LIST2_ADD (current->spt_array[spt_index].shadow1_free, shadow,
+			   &current->spt_array[spt_index].shadow1[i]);
 	}
 	for (i = 0; i < HASHSIZE_OF_SPTSHADOW1N; i++)
-		LIST2_HEAD_INIT (current->spt.shadow1_hashn[i], hash);
+		LIST2_HEAD_INIT (current->spt_array[spt_index].shadow1_hashn[i], hash);
 	for (i = 0; i < HASHSIZE_OF_SPTSHADOW1M; i++)
-		LIST2_HEAD_INIT (current->spt.shadow1_hashm[i], hash);
-	spinlock_unlock (&current->spt.shadow1_lock);
+		LIST2_HEAD_INIT (current->spt_array[spt_index].shadow1_hashm[i], hash);
+	spinlock_unlock (&current->spt_array[spt_index].shadow1_lock);
 }
 
 static void
-clear_shadow2 (void)
+clear_shadow2 (unsigned int spt_index)
 {
 	unsigned int i;
 
-	spinlock_lock (&current->spt.shadow2_lock);
-	LIST2_HEAD_INIT (current->spt.shadow2_modified, shadow);
-	LIST2_HEAD_INIT (current->spt.shadow2_normal, shadow);
-	LIST2_HEAD_INIT (current->spt.shadow2_free, shadow);
+	spinlock_lock (&current->spt_array[spt_index].shadow2_lock);
+	LIST2_HEAD_INIT (current->spt_array[spt_index].shadow2_modified, shadow);
+	LIST2_HEAD_INIT (current->spt_array[spt_index].shadow2_normal, shadow);
+	LIST2_HEAD_INIT (current->spt_array[spt_index].shadow2_free, shadow);
 	for (i = 0; i < NUM_OF_SPTSHADOW2; i++) {
-		clear_shadow (&current->spt.shadow2[i]);
-		LIST2_ADD (current->spt.shadow2_free, shadow,
-			   &current->spt.shadow2[i]);
+		clear_shadow (&current->spt_array[spt_index].shadow2[i]);
+		LIST2_ADD (current->spt_array[spt_index].shadow2_free, shadow,
+			   &current->spt_array[spt_index].shadow2[i]);
 	}
 	for (i = 0; i < NUM_OF_SPTSHADOW2; i++)
-		clear_shadow (&current->spt.shadow2[i]);
+		clear_shadow (&current->spt_array[spt_index].shadow2[i]);
 	for (i = 0; i < HASHSIZE_OF_SPTSHADOW2N; i++)
-		LIST2_HEAD_INIT (current->spt.shadow2_hashn[i], hash);
+		LIST2_HEAD_INIT (current->spt_array[spt_index].shadow2_hashn[i], hash);
 	for (i = 0; i < HASHSIZE_OF_SPTSHADOW2M; i++)
-		LIST2_HEAD_INIT (current->spt.shadow2_hashm[i], hash);
-	spinlock_unlock (&current->spt.shadow2_lock);
+		LIST2_HEAD_INIT (current->spt_array[spt_index].shadow2_hashm[i], hash);
+	spinlock_unlock (&current->spt_array[spt_index].shadow2_lock);
 }
 
 static void
-invalidate_page (ulong v)
+invalidate_page (unsigned int spt_index, ulong v)
 {
 	pmap_t p;
 	u64 tmp;
 
 	STATUS_UPDATE (asm_lock_incl (&stat_invlpgcnt));
 	if (true) {		/* FIXME: clean* seems good but slow */
-		spinlock_lock (&current->spt.shadow1_lock);
-		clean_modified_shadow1 (false);
-		spinlock_unlock (&current->spt.shadow1_lock);
-		spinlock_lock (&current->spt.shadow2_lock);
-		clean_modified_shadow2 (false);
-		spinlock_unlock (&current->spt.shadow2_lock);
+		spinlock_lock (&current->spt_array[spt_index].shadow1_lock);
+		clean_modified_shadow1 (spt_index, false);
+		spinlock_unlock (&current->spt_array[spt_index].shadow1_lock);
+		spinlock_lock (&current->spt_array[spt_index].shadow2_lock);
+		clean_modified_shadow2 (spt_index, false);
+		spinlock_unlock (&current->spt_array[spt_index].shadow2_lock);
 		return;
 	}
-	pmap_open_vmm (&p, current->spt.cr3tbl_phys, current->spt.levels);
+	pmap_open_vmm (&p, current->spt_array[spt_index].cr3tbl_phys, current->spt_array[spt_index].levels);
 	pmap_seek (&p, v, 2);
 	tmp = pmap_read (&p);
 	if (tmp & PDE_P_BIT) {
 		if (tmp & PDE_AVAILABLE1_BIT) {
 			pmap_write (&p, 0, 0xFFF);
-			if (current->spt.levels >= 3) {
+			if (current->spt_array[spt_index].levels >= 3) {
 				pmap_seek (&p, v ^ PAGESIZE2M, 2);
 				tmp = pmap_read (&p);
 				if (tmp & PDE_P_BIT)
@@ -2096,50 +2097,50 @@ invalidate_page (ulong v)
 }
 
 static void
-update_cr3 (void)
+update_cr3 (unsigned int spt_index)
 {
 	pmap_t p;
 	ulong cr0;
 
 	STATUS_UPDATE (asm_lock_incl (&stat_cr3cnt));
 #ifdef CPU_MMU_SPT_USE_PAE
-	current->spt.levels = guest64 () ? 4 : 3;
+	current->spt_array[spt_index].levels = guest64 () ? 4 : 3;
 #else
-	current->spt.levels = 2;
+	current->spt_array[spt_index].levels = 2;
 #endif
-	pmap_open_vmm (&p, current->spt.cr3tbl_phys, current->spt.levels);
+	pmap_open_vmm (&p, current->spt_array[spt_index].cr3tbl_phys, current->spt_array[spt_index].levels);
 	pmap_clear (&p);
 	pmap_close (&p);
-	current->spt.cnt = 0;
-	current->vmctl.spt_setcr3 (current->spt.cr3tbl_phys);
+	current->spt_array[spt_index].cnt = 0;
+	current->vmctl.spt_setcr3 (current->spt_array[spt_index].cr3tbl_phys);
 	current->vmctl.read_control_reg (CONTROL_REG_CR0, &cr0);
-	if (current->spt.wp && !(cr0 & CR0_WP_BIT)) {
-		current->spt.wp = false;
-		clear_rwmap ();
-		clear_shadow1 ();
-		clear_shadow2 ();
+	if (current->spt_array[spt_index].wp && !(cr0 & CR0_WP_BIT)) {
+		current->spt_array[spt_index].wp = false;
+		clear_rwmap (spt_index);
+		clear_shadow1 (spt_index);
+		clear_shadow2 (spt_index);
 		STATUS_UPDATE (asm_lock_incl (&stat_wpcnt));
 	}
-	if (!current->spt.wp && (cr0 & CR0_WP_BIT)) {
-		current->spt.wp = true;
-		clear_rwmap ();
-		clear_shadow1 ();
-		clear_shadow2 ();
+	if (!current->spt_array[spt_index].wp && (cr0 & CR0_WP_BIT)) {
+		current->spt_array[spt_index].wp = true;
+		clear_rwmap (spt_index);
+		clear_shadow1 (spt_index);
+		clear_shadow2 (spt_index);
 		STATUS_UPDATE (asm_lock_incl (&stat_wpcnt));
 	}
-	update_rwmap (0, NULL);
-	spinlock_lock (&current->spt.shadow1_lock);
-	clean_modified_shadow1 (false);
-	spinlock_unlock (&current->spt.shadow1_lock);
-	spinlock_lock (&current->spt.shadow2_lock);
-	clean_modified_shadow2 (true);
-	spinlock_unlock (&current->spt.shadow2_lock);
+	update_rwmap (spt_index, 0, NULL);
+	spinlock_lock (&current->spt_array[spt_index].shadow1_lock);
+	clean_modified_shadow1 (spt_index, false);
+	spinlock_unlock (&current->spt_array[spt_index].shadow1_lock);
+	spinlock_lock (&current->spt_array[spt_index].shadow2_lock);
+	clean_modified_shadow2 (spt_index, true);
+	spinlock_unlock (&current->spt_array[spt_index].shadow2_lock);
 }
 
 static bool
-spt_tlbflush (void)
+spt_tlbflush (unsigned int spt_index)
 {
-	return update_rwmap (0, NULL);
+	return update_rwmap (spt_index, 0, NULL);
 }
 
 static char *
@@ -2169,7 +2170,10 @@ spt_status (void)
 static void
 init_global (void)
 {
-	LIST1_HEAD_INIT (list1_spt);
+	int i;
+	
+	for(i = 0;i < NUM_OF_SPT;i++)
+		LIST1_HEAD_INIT (list1_spt_array[i]);
 	register_status_callback (spt_status);
 }
 
@@ -2179,38 +2183,38 @@ init_pcpu (void)
 }
 
 static int
-init_vcpu (void)
+init_vcpu (unsigned int spt_index)
 {
 	int i;
 	struct sptlist *listspt;
 
-	alloc_page (&current->spt.cr3tbl, &current->spt.cr3tbl_phys);
+	alloc_page (&current->spt_array[spt_index].cr3tbl, &current->spt_array[spt_index].cr3tbl_phys);
 	for (i = 0; i < NUM_OF_SPTTBL; i++)
-		alloc_page (&current->spt.tbl[i], &current->spt.tbl_phys[i]);
-	current->spt.cnt = 0;
-	memset (current->spt.cr3tbl, 0, PAGESIZE);
+		alloc_page (&current->spt_array[spt_index].tbl[i], &current->spt_array[spt_index].tbl_phys[i]);
+	current->spt_array[spt_index].cnt = 0;
+	memset (current->spt_array[spt_index].cr3tbl, 0, PAGESIZE);
 	for (i = 0; i < NUM_OF_SPTSHADOW1; i++) {
-		alloc_page (NULL, &current->spt.shadow1[i].phys);
-		current->spt.shadow1[i].key = 0;
-		current->spt.shadow1[i].clear_n = NUM_OF_SPTSHADOWOFF + 1;
-		current->spt.shadow1[i].clear_area = ~0ULL;
+		alloc_page (NULL, &current->spt_array[spt_index].shadow1[i].phys);
+		current->spt_array[spt_index].shadow1[i].key = 0;
+		current->spt_array[spt_index].shadow1[i].clear_n = NUM_OF_SPTSHADOWOFF + 1;
+		current->spt_array[spt_index].shadow1[i].clear_area = ~0ULL;
 	}
 	for (i = 0; i < NUM_OF_SPTSHADOW2; i++) {
-		alloc_page (NULL, &current->spt.shadow2[i].phys);
-		current->spt.shadow2[i].key = 0;
-		current->spt.shadow2[i].clear_n = NUM_OF_SPTSHADOWOFF + 1;
-		current->spt.shadow2[i].clear_area = ~0ULL;
+		alloc_page (NULL, &current->spt_array[spt_index].shadow2[i].phys);
+		current->spt_array[spt_index].shadow2[i].key = 0;
+		current->spt_array[spt_index].shadow2[i].clear_n = NUM_OF_SPTSHADOWOFF + 1;
+		current->spt_array[spt_index].shadow2[i].clear_area = ~0ULL;
 	}
-	spinlock_init (&current->spt.rwmap_lock);
-	spinlock_init (&current->spt.shadow1_lock);
-	spinlock_init (&current->spt.shadow2_lock);
-	clear_rwmap ();
-	clear_shadow1 ();
-	clear_shadow2 ();
-	current->spt.wp = false;
+	spinlock_init (&current->spt_array[spt_index].rwmap_lock);
+	spinlock_init (&current->spt_array[spt_index].shadow1_lock);
+	spinlock_init (&current->spt_array[spt_index].shadow2_lock);
+	clear_rwmap (spt_index);
+	clear_shadow1 (spt_index);
+	clear_shadow2 (spt_index);
+	current->spt_array[spt_index].wp = false;
 	listspt = alloc (sizeof *listspt);
-	listspt->spt = &current->spt;
-	LIST1_PUSH (list1_spt, listspt);
+	listspt->spt = &current->spt_array[spt_index];
+	LIST1_PUSH (list1_spt_array[spt_index], listspt);
 	return 0;
 }
 #endif /* CPU_MMU_SPT_3 */
@@ -2261,14 +2265,31 @@ generate_pf_noexec (u32 err, ulong cr2)
 bool
 cpu_mmu_spt_tlbflush (void)
 {
-	return spt_tlbflush ();
+	bool retval;
+	int i;
+	
+	retval = spt_tlbflush (current->current_spt_index);
+	
+	for(i = 0;i < NUM_OF_SPT; i++){
+		if(i != current->current_spt_index){
+			spt_tlbflush (i);
+		}
+	}
+
+	return retval;
 }
 
 /* this function is called when a guest sets CR3 */
 void
 cpu_mmu_spt_updatecr3 (void)
 {
-	update_cr3 ();
+	int i;
+	
+	for(i = 0;i < NUM_OF_SPT; i++){
+		update_cr3 (i);
+	}
+	
+	current->vmctl.spt_setcr3 (current->spt_array[current->current_spt_index].cr3tbl_phys);
 }
 
 /* this function is called by INVLPG in a guest */
@@ -2276,7 +2297,11 @@ cpu_mmu_spt_updatecr3 (void)
 void
 cpu_mmu_spt_invalidate (ulong virtual_addr)
 {
-	invalidate_page (virtual_addr);
+	int i;
+	
+	for(i = 0;i < NUM_OF_SPT; i++){
+		invalidate_page (i, virtual_addr);
+	}
 }
 
 static void
@@ -2343,6 +2368,10 @@ cpu_mmu_spt_pagefault (ulong err, ulong cr2)
 	struct map_page_data1 m1;
 	struct map_page_data2 m2[5];
 	u64 efer, gfns[5], entries[5];
+	struct map_page_data1 m1_pass;
+	struct map_page_data2 m2_pass[5];
+	u64 gfns_pass[5];
+	int i;
 #ifdef RK_ANALYZER
 	enum rk_result rk_res;
 	pmap_t m;
@@ -2410,7 +2439,12 @@ cpu_mmu_spt_pagefault (ulong err, ulong cr2)
 		set_gfns (entries, levels, gfns);
 		mmio_lock ();
 		if (!mmio_access_page (gfns[0] << PAGESIZE_SHIFT)){
-			map_page (cr2, m1, m2, gfns, levels);
+			for(i = 0;i < NUM_OF_SPT; i++){
+				memcpy(&m1_pass, &m1, sizeof(struct map_page_data1));
+				memcpy(m2_pass, m2, sizeof(struct map_page_data2) * 5);
+				memcpy(gfns_pass, gfns, sizeof(u64) * 5);
+				map_page (i, cr2, m1_pass, m2_pass, gfns_pass, levels);
+			}
 #ifdef RK_ANALYZER
 			if(p_rk_tf->initialized && (cr2 >= os_dep.va_kernel_start)){
 				rk_manipulate_mmarea_if_need(cr2, gfns[0]);
@@ -2432,7 +2466,19 @@ cpu_mmu_spt_pagefault (ulong err, ulong cr2)
 bool
 cpu_mmu_spt_extern_mapsearch (struct vcpu *p, phys_t start, phys_t end)
 {
-	return extern_mapsearch (p, start, end);
+	bool retval;
+	int i;
+	unsigned int exclude = p->current_spt_index;
+	
+	retval = extern_mapsearch (exclude, p, start, end);
+	
+	for(i = 0;i < NUM_OF_SPT; i++){
+		if(i != exclude){
+			extern_mapsearch (i, p, start, end);
+		}
+	}
+
+	return retval;
 }
 
 static void
@@ -2450,7 +2496,19 @@ cpu_mmu_spt_init_pcpu (void)
 int
 cpu_mmu_spt_init (void)
 {
-	return init_vcpu ();
+	int i;
+	int retval = 0;
+	
+	for(i = 0;i < NUM_OF_SPT; i++){
+		if(i == 0)
+			retval = init_vcpu (i);
+		else
+			init_vcpu (i);
+	}
+	
+	current->current_spt_index = 0;
+	
+	return retval;
 }
 
 INITFUNC ("global4", cpu_mmu_spt_init_global);

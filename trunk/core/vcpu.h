@@ -42,6 +42,17 @@
 #include "vt.h"
 #include "rk_main.h"
 
+#ifdef RK_ANALYZER
+#define NORMAL_SPT 0			//Normal SPT. No W/R, No NX
+#define KERNEL_LEGAL_SPT 1		//W/R = 0, KERNEL LEGAL NX = 0, KERNEL ILLEGAL NX = 1, USER NX = 1
+#define KERNEL_ILLEGAL_SPT 2 	//W/R = 1, KERNEL LEGAL NX = 1, KERNEL ILLEGAL NX = 0, USER NX = 1
+#define USER_SPT 3				//W/R = 1, KERNEL NX = 1, USER NX = 0
+#define NUM_OF_SPT 4
+#else
+#define NORMAL_SPT 0
+#define NUM_OF_SPT 1
+#endif
+
 struct exint_func {
 	void (*int_enabled) (void);
 	void (*exintfunc_default) (int num);
@@ -67,7 +78,8 @@ struct vcpu {
 	bool initialized;
 	u64 tsc_offset;
 	bool updateip;
-	struct cpu_mmu_spt_data spt;
+	struct cpu_mmu_spt_data spt_array[NUM_OF_SPT];
+	unsigned int current_spt_index;
 	struct cpuid_data cpuid;
 	struct exint_func exint;
 	struct gmm_func gmm;
