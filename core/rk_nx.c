@@ -86,12 +86,20 @@ void rk_nx_try_setup_per_vcpu()
 		spinlock_lock(&mm_code_area_lock);
 		rk_tf->current_code_legal = ((os_dep.unknown_code_check_dispatcher(ip) == RK_CODE_LEGAL) ? true : false);
 		spinlock_unlock(&mm_code_area_lock);
-		cpu_mmu_spt_updatecr3();
+		
+		cpu_mmu_spt_clearall ();
+		if(rk_tf->current_code_legal){
+			cpu_mmu_spt_switch(KERNEL_LEGAL_SPT);
+		}
+		else{
+			cpu_mmu_spt_switch(KERNEL_ILLEGAL_SPT);
+		}
 	}
 	else if(rk_tf->cpl_last == CPL_USER)
 	{
 		//Flush Page Table
-		cpu_mmu_spt_updatecr3();
+		cpu_mmu_spt_clearall ();
+		cpu_mmu_spt_switch(USER_SPT);
 	}
 	else
 	{
@@ -227,12 +235,15 @@ bool rk_del_code_mmvarange(virt_t startaddr, virt_t endaddr)
 	return ret;
 }
 
-static void rk_mark_page_nx(virt_t addr)
+static void rk_mark_page_nx(unsigned int spt_index, virt_t addr)
 {
 	u64 pte;
 	pmap_t m;
 	
-	pmap_open_vmm (&m, current->spt_array[NORMAL_SPT].cr3tbl_phys, current->spt_array[NORMAL_SPT].levels);
+	if((spt_index < 0) || (spt_index >= NUM_OF_SPT))
+		return;
+	
+	pmap_open_vmm (&m, current->spt_array[spt_index].cr3tbl_phys, current->spt_array[spt_index].levels);
 	pmap_seek (&m, addr, 1);
 	pte = pmap_read(&m);
 	pte = pte | PTE_NX_BIT;
@@ -240,12 +251,15 @@ static void rk_mark_page_nx(virt_t addr)
 	pmap_close(&m);
 }
 
-static void rk_unmark_page_nx(virt_t addr)
+static void rk_unmark_page_nx(unsigned int spt_index, virt_t addr)
 {
 	u64 pte;
 	pmap_t m;
 	
-	pmap_open_vmm (&m, current->spt_array[NORMAL_SPT].cr3tbl_phys, current->spt_array[NORMAL_SPT].levels);
+	if((spt_index < 0) || (spt_index >= NUM_OF_SPT))
+		return;
+	
+	pmap_open_vmm (&m, current->spt_array[spt_index].cr3tbl_phys, current->spt_array[spt_index].levels);
 	pmap_seek (&m, addr, 1);
 	pte = pmap_read(&m);
 	pte = pte & (~PTE_NX_BIT);
@@ -302,89 +316,43 @@ void rk_manipulate_code_mmvarange_if_need(virt_t newvirtaddr, u64 gfns){
 	struct rk_tf_state *rk_tf = current->vmctl.get_struct_rk_tf();
 	cpl_current = rk_nx_rd_guest_cpl();
 	
-	//We don't handle Kernel<->User switch here
-	//If switch happen with page not present, we load it and mark nx, 
-	//so switch would be delayed to rk_check_code_mmarea on next VM Entry
-	
 	//Route:
-	//1.CPL_LAST = KERNEL, newvirtaddr in userland : mark Page[newvirtaddr].NX = 1
-	//2.CPL_LAST = KERNEL, newvirtaddr in kernel :
-	//2(a). current_code_legal = true
-	//2(a)_1. newvirtaddr is legal : mark Page[newvirtaddr].NX = 0
-	//2(a)_2. newvirtaddr is illegal : mark Page[newvirtaddr].NX = 1
-	//2(a)_3. newvirtaddr is not known : mark Page[newvirtaddr].NX = 1, so it will be processed in rk_check_code_mmarea on next VMEntry
-	//2(b). current_code_legal = false
-	//2(b)_1. newvirtaddr is legal : mark Page[newvirtaddr].NX = 1
-	//2(b)_2. newvirtaddr is illegal : mark Page[newvirtaddr].NX = 0
-	//2(b)_3. newvirtaddr is not known : mark Page[newvirtaddr].NX = 1, so it will be processed in rk_check_code_mmarea on next VMEntry
-	//3.CPL_LAST = USER, newvirtaddr in kernel : mark Page[newvirtaddr].NX = 1
-	//4.CPL_LAST = USER, newvirtaddr in user : Do nothing
+	//1.newvirtaddr is kernel
+	//1(a).newvirtaddr is legal
+	//1(b).newvirtaddr is illegal
+	//1(c).newvirtaddr is unknown
+	//2.newvirtaddr is user
 	
-	if(cpl_current == CPL_KERNEL){
-		if(is_kernel_page(newvirtaddr)){
-			//Route 2
-			spinlock_lock(&mm_code_area_lock);
-			mmvarange = rk_check_code_type_same_page_core(newvirtaddr);
-			spinlock_unlock(&mm_code_area_lock);
-			
-			if(rk_tf->current_code_legal){
-				//Route 2(a)
-				if(mmvarange == NULL){
-					//Route 2(a)_3
-					//printf("Route 2(a)_3, %lX, CPU[%d]\n", newvirtaddr, get_cpu_id());
-					rk_mark_page_nx(newvirtaddr);
-				}
-				else{
-					if(mmvarange->legal){
-						//Route 2(a)_1
-						//printf("Route 2(a)_1, %lX, CPU[%d]\n", newvirtaddr, get_cpu_id());
-					}
-					else{
-						//Route 2(a)_2
-						//printf("Route 2(a)_2, %lX, CPU[%d]\n", newvirtaddr, get_cpu_id());
-						rk_mark_page_nx(newvirtaddr);
-					}
-				}
-			}
-			else{
-				//Route 2(b)
-				if(mmvarange == NULL){
-					//Route 2(b)_3
-					//printf("Route 2(b)_3, %lX, CPU[%d]\n", newvirtaddr, get_cpu_id());
-					rk_mark_page_nx(newvirtaddr);
-				}
-				else{
-					if(mmvarange->legal){
-						//Route 2(b)_1
-						//printf("Route 2(b)_1, %lX, CPU[%d]\n", newvirtaddr, get_cpu_id());
-						rk_mark_page_nx(newvirtaddr);
-					}
-					else{
-						//Route 2(b)_2
-						//printf("Route 2(b)_2, %lX, CPU[%d]\n", newvirtaddr, get_cpu_id());
-					}
-				}
-			}
-			
+	if(is_kernel_page(newvirtaddr)){
+	
+		rk_mark_page_nx(USER_SPT, newvirtaddr);
+		
+		//Route 1
+		spinlock_lock(&mm_code_area_lock);
+		mmvarange = rk_check_code_type_same_page_core(newvirtaddr);
+		spinlock_unlock(&mm_code_area_lock);
+		if(mmvarange == NULL){	
+			//Route 1(c)
+			rk_mark_page_nx(KERNEL_LEGAL_SPT, newvirtaddr);
+			rk_mark_page_nx(KERNEL_ILLEGAL_SPT, newvirtaddr);
 		}
 		else{
-			//Route 1
-			//printf("Route 1, %lX, CPU[%d]\n", newvirtaddr, get_cpu_id());
-			rk_mark_page_nx(newvirtaddr);
+			if(mmvarange->legal){
+				//Route 1(a)
+				rk_unmark_page_nx(KERNEL_LEGAL_SPT, newvirtaddr);
+				rk_mark_page_nx(KERNEL_ILLEGAL_SPT, newvirtaddr);
+			}
+			else{
+				rk_mark_page_nx(KERNEL_LEGAL_SPT, newvirtaddr);
+				rk_unmark_page_nx(KERNEL_ILLEGAL_SPT, newvirtaddr);
+			}
 		}
 	}
 	else{
-		if(is_kernel_page(newvirtaddr)){
-			//Route 3
-			//printf("Route 3, %lX, CPU[%d]\n", newvirtaddr, get_cpu_id());
-			rk_mark_page_nx(newvirtaddr);
-		}
-		else{
-			//Route 4
-			//printf("Route 4, %lX, CPU[%d]\n", newvirtaddr, get_cpu_id());
-		}
+		rk_mark_page_nx(KERNEL_LEGAL_SPT, newvirtaddr);
+		rk_mark_page_nx(KERNEL_ILLEGAL_SPT, newvirtaddr);
+		rk_unmark_page_nx(USER_SPT, newvirtaddr);
 	}
-	
 }
 
 
@@ -427,7 +395,7 @@ enum rk_nx_result rk_check_code_mmvarange(virt_t virtaddr)
 			//Route 1
 			rk_tf->cpl_last = CPL_USER;
 			rk_tf->disable_protect = false;
-			cpu_mmu_spt_updatecr3();
+			cpu_mmu_spt_switch(USER_SPT);
 			
 			return RK_NX_K2U;
 		}
@@ -444,7 +412,6 @@ enum rk_nx_result rk_check_code_mmvarange(virt_t virtaddr)
 				if(rk_tf->current_code_legal == legal){
 					//Route 3c(1)
 					spinlock_unlock(&mm_code_area_lock);
-					cpu_mmu_spt_updatecr3();
 				
 					if(legal){
 						print_switch_info();
@@ -466,7 +433,7 @@ enum rk_nx_result rk_check_code_mmvarange(virt_t virtaddr)
 				//Route 3a
 				rk_tf->current_code_legal = legal;
 				rk_tf->disable_protect = false;
-				cpu_mmu_spt_updatecr3();
+				cpu_mmu_spt_switch(KERNEL_ILLEGAL_SPT);
 				print_switch_info();
 				return RK_NX_L2IL;
 			}
@@ -474,12 +441,12 @@ enum rk_nx_result rk_check_code_mmvarange(virt_t virtaddr)
 				//Route 3b
 				rk_tf->current_code_legal = legal;
 				rk_tf->disable_protect = true;
-				cpu_mmu_spt_updatecr3();
+				cpu_mmu_spt_switch(KERNEL_LEGAL_SPT);
 				print_switch_info();
 				return RK_NX_IL2L;
 			}
 			
-			panic("Strange Status in rk_nx 0, %d, %d, %lX, CPU[%d]\n", legal, rk_tf->current_code_legal, virtaddr, get_cpu_id());
+			//panic("Strange Status in rk_nx 0, %d, %d, %lX, CPU[%d]\n", legal, rk_tf->current_code_legal, virtaddr, get_cpu_id());
 			return RK_NX_SYSTEM;
 		}
 		
@@ -508,12 +475,12 @@ enum rk_nx_result rk_check_code_mmvarange(virt_t virtaddr)
 			if(legal){
 				//Route 2a
 				rk_tf->disable_protect = true;
-				cpu_mmu_spt_updatecr3();
+				cpu_mmu_spt_switch(KERNEL_LEGAL_SPT);
 			}
 			else{
 				//Route 2b
 				rk_tf->disable_protect = false;
-				cpu_mmu_spt_updatecr3();
+				cpu_mmu_spt_switch(KERNEL_ILLEGAL_SPT);
 			}
 			
 			return RK_NX_U2K;

@@ -67,7 +67,7 @@ struct map_page_data2 {
 #define GFN_UNUSED	0xFFFFFFFFFFFFFFFFULL
 
 static bool guest64 (void);
-static void update_cr3 (unsigned int spt_index);
+static void update_cr3 (unsigned int spt_index, bool clearall);
 static void invalidate_page (unsigned int spt_index, ulong virtual_addr);
 static void map_page (unsigned int spt_index, u64 v, struct map_page_data1 m1,
 		      struct map_page_data2 m2[5], u64 gfns[5], int glvl);
@@ -196,7 +196,7 @@ extern_mapsearch (unsigned int spt_index, struct vcpu *p, phys_t start, phys_t e
 }
 
 static void
-update_cr3 (unsigned int spt_index)
+update_cr3 (unsigned int spt_index, bool clearall)
 {
 	pmap_t p;
 
@@ -1075,10 +1075,11 @@ clear_shadow2 (unsigned int spt_index)
 }
 
 static void
-update_cr3 (unsigned int spt_index)
+update_cr3 (unsigned int spt_index, bool clearall)
 {
 	pmap_t p;
 	ulong cr0;
+	bool cleared = false;
 
 	STATUS_UPDATE (asm_lock_incl (&stat_cr3cnt));
 #ifdef CPU_MMU_SPT_USE_PAE
@@ -1098,6 +1099,7 @@ update_cr3 (unsigned int spt_index)
 		clear_shadow1 (spt_index);
 		clear_shadow2 (spt_index);
 		STATUS_UPDATE (asm_lock_incl (&stat_wpcnt));
+		cleared = true;
 	}
 	if (!current->spt_array[spt_index].wp && (cr0 & CR0_WP_BIT)) {
 		current->spt_array[spt_index].wp = true;
@@ -1105,6 +1107,12 @@ update_cr3 (unsigned int spt_index)
 		clear_shadow1 (spt_index);
 		clear_shadow2 (spt_index);
 		STATUS_UPDATE (asm_lock_incl (&stat_wpcnt));
+		cleared = true;
+	}
+	if ((!cleared) && (clearall)) {
+		clear_rwmap (spt_index);
+		clear_shadow1 (spt_index);
+		clear_shadow2 (spt_index);
 	}
 	update_rwmap (spt_index, 0, NULL);
 	spinlock_lock (&current->spt_array[spt_index].shadow1_lock);
@@ -2097,10 +2105,11 @@ invalidate_page (unsigned int spt_index, ulong v)
 }
 
 static void
-update_cr3 (unsigned int spt_index)
+update_cr3 (unsigned int spt_index, bool clearall)
 {
 	pmap_t p;
 	ulong cr0;
+	bool cleared = false;
 
 	STATUS_UPDATE (asm_lock_incl (&stat_cr3cnt));
 #ifdef CPU_MMU_SPT_USE_PAE
@@ -2120,6 +2129,7 @@ update_cr3 (unsigned int spt_index)
 		clear_shadow1 (spt_index);
 		clear_shadow2 (spt_index);
 		STATUS_UPDATE (asm_lock_incl (&stat_wpcnt));
+		cleared = true;
 	}
 	if (!current->spt_array[spt_index].wp && (cr0 & CR0_WP_BIT)) {
 		current->spt_array[spt_index].wp = true;
@@ -2127,6 +2137,12 @@ update_cr3 (unsigned int spt_index)
 		clear_shadow1 (spt_index);
 		clear_shadow2 (spt_index);
 		STATUS_UPDATE (asm_lock_incl (&stat_wpcnt));
+		cleared = true;
+	}
+	if ((!cleared) && (clearall)) {
+		clear_rwmap (spt_index);
+		clear_shadow1 (spt_index);
+		clear_shadow2 (spt_index);
 	}
 	update_rwmap (spt_index, 0, NULL);
 	spinlock_lock (&current->spt_array[spt_index].shadow1_lock);
@@ -2286,7 +2302,7 @@ cpu_mmu_spt_updatecr3 (void)
 	int i;
 	
 	for(i = 0;i < NUM_OF_SPT; i++){
-		update_cr3 (i);
+		update_cr3 (i, false);
 	}
 	
 	current->vmctl.spt_setcr3 (current->spt_array[current->current_spt_index].cr3tbl_phys);
@@ -2509,6 +2525,25 @@ cpu_mmu_spt_init (void)
 	current->current_spt_index = 0;
 	
 	return retval;
+}
+
+void cpu_mmu_spt_switch (unsigned int spt_index)
+{
+	if((spt_index >= 0) && (spt_index < NUM_OF_SPT)){
+		current->current_spt_index = spt_index;
+		current->vmctl.spt_setcr3 (current->spt_array[spt_index].cr3tbl_phys);
+	}
+}
+
+void cpu_mmu_spt_clearall ()
+{
+	int i;
+	
+	for(i = 0;i < NUM_OF_SPT; i++){
+		update_cr3 (i, true);
+	}
+	
+	current->vmctl.spt_setcr3 (current->spt_array[current->current_spt_index].cr3tbl_phys);
 }
 
 INITFUNC ("global4", cpu_mmu_spt_init_global);
