@@ -168,5 +168,7 @@ void cpu_mmu_spt_invalidate (ulong virtual_addr);
 void cpu_mmu_spt_pagefault (ulong err, ulong cr2);
 bool cpu_mmu_spt_extern_mapsearch (struct vcpu *p, phys_t start, phys_t end);
 int cpu_mmu_spt_init (void);
+void cpu_mmu_spt_switch (unsigned int spt_index);
+void cpu_mmu_spt_clearall ();
 
 #endif

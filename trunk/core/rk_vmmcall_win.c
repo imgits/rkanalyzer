@@ -999,6 +999,8 @@ static enum rk_code_type rk_win_unknown_code_check_dispatch(virt_t addr)
 {
 	struct guest_win_pe_section *section;
 	struct guest_win_pe *pe;
+	struct guest_win_pe_base_filter *p_pe_base_filter;
+	bool in_filter = false;
 	
 	if((pe = rk_win_get_pe_from_code_addr(addr)) != NULL){
 		if(pe->legal)
@@ -1010,12 +1012,19 @@ static enum rk_code_type rk_win_unknown_code_check_dispatch(virt_t addr)
 	init_pe_struct(new_pe);
 	if(rk_win_readfromguest(new_pe, false, addr))
 	{
-		new_pe->legal = false;
+		LIST1_FOREACH (list_pe_base_filter, p_pe_base_filter) {
+			if(p_pe_base_filter->imagebase == new_pe->imagebase){
+				in_filter = true;
+				break;
+			}
+		}
+		
+		new_pe->legal = in_filter;
 		LIST1_ADD(list_pes, new_pe);
 		//rk_win_protectpereadonlysections(new_pe);
 		LIST1_FOREACH (new_pe->list_sections, section) {
 			if((section->characteristics & IMAGE_SCN_MEM_EXECUTE) != 0)
-				rk_add_code_mmvarange_nolock(false, section->va, section->va + section->size - 1, mmcode_callback_general);
+				rk_add_code_mmvarange_nolock(new_pe->legal, section->va, section->va + section->size - 1, mmcode_callback_general);
 		}
 	}
 	else{
@@ -1051,6 +1060,8 @@ static void rk_win_switch_print_dispatch(virt_t from_ip, virt_t to_ip)
 	struct guest_win_pe *p_from_pe, *p_to_pe;
 	bool in_filter = false;
 	ulong idt_index;
+	u8 inst;
+	int err;
 	
 	if(rk_win_is_system_code(to_ip)){
 		p_to_pe = &kernel_pe;
@@ -1089,7 +1100,15 @@ static void rk_win_switch_print_dispatch(virt_t from_ip, virt_t to_ip)
 				}
 				if(in_filter)
 					return;
-			
+				
+				//check if we return from interrupt(iretd)
+				//if we do, we don't bother output the return.
+				if ((err = read_linearaddr_b (from_ip, &inst)) == VMMERR_SUCCESS){
+					if(inst == 0xCF){
+						return;
+					}
+				}
+				
 				//kernel->rootkit
 				printf("[RKAnalyzer][Kernel->Rootkit][%s->%s][%lX->%lX]\n", p_from_pe->name, p_to_pe->name, from_ip, to_ip);
 			}
