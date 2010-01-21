@@ -131,7 +131,10 @@ static void rk_mark_page_readonly_single(unsigned int spt_index, virt_t addr)
 	pmap_seek (&m, addr, 1);
 	pte = pmap_read(&m);
 	pte = pte & (~PTE_RW_BIT);
-	pmap_write (&m, pte, 0xFFF);
+	
+	if(pte & PTE_P_BIT)
+		pmap_write (&m, pte, 0xFFF);
+		
 	pmap_close(&m);
 }
 
@@ -147,7 +150,10 @@ static void rk_unmark_page_readonly_single(unsigned int spt_index, virt_t addr)
 	pmap_seek (&m, addr, 1);
 	pte = pmap_read(&m);
 	pte = pte | PTE_RW_BIT;
-	pmap_write (&m, pte, 0xFFF);
+	
+	if(pte & PTE_P_BIT)
+		pmap_write (&m, pte, 0xFFF);
+		
 	pmap_close(&m);
 }
 
