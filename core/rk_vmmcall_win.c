@@ -571,7 +571,7 @@ static void rk_win_dr_dispatch(int debug_num)
 		else{
 			exalloc_call_info->retval = eax;
 			
-			if((exalloc_call_info->retval != 0) && (exalloc_call_info->param_tag == (0x636f7250 | 0x80000000))){
+			if((exalloc_call_info->retval != 0) /*&& (exalloc_call_info->param_tag == (0x636f7250 | 0x80000000))*/){
 				//printf("[CPU %d]Call Info: Caller=0x%lx, PoolType=0x%lx, NumberOfBytes=0x%lx, Tag=0x%lX, RetVal=0x%lX\n", get_cpu_id(), 
 				//exalloc_call_info->retaddr, exalloc_call_info->param_pooltype, exalloc_call_info->param_numberofbytes, 
 				//exalloc_call_info->param_tag, exalloc_call_info->retval);
@@ -1077,14 +1077,14 @@ static void rk_win_switch_print_dispatch(virt_t from_ip, virt_t to_ip)
 				return;
 			
 			//rootkit->kernel
-			/*
+			
 			if(rk_win_is_addr_in_idt(to_ip, &idt_index)){
 				//TODO:Check More for Route 5
 				return;
 			}
-			*/
 			
-			printf("[RKAnalyzer][Rootkit->Kernel][%s->%s][%lX->%lX]\n", p_from_pe->name, p_to_pe->name, from_ip, to_ip);
+			printf("[RKAnalyzer][Rootkit->Kernel][%s+0x%lX->%s+0x%lX][%lX->%lX]\n", p_from_pe->name, from_ip - p_from_pe->imagebase, 
+				p_to_pe->name, to_ip - p_to_pe->imagebase, from_ip, to_ip);
 		}
 	}
 	else{
@@ -1110,7 +1110,8 @@ static void rk_win_switch_print_dispatch(virt_t from_ip, virt_t to_ip)
 				}
 				
 				//kernel->rootkit
-				printf("[RKAnalyzer][Kernel->Rootkit][%s->%s][%lX->%lX]\n", p_from_pe->name, p_to_pe->name, from_ip, to_ip);
+				printf("[RKAnalyzer][Kernel->Rootkit][%s+0x%lX->%s+0x%lX][%lX->%lX]\n", p_from_pe->name, from_ip - p_from_pe->imagebase, 
+					p_to_pe->name, to_ip - p_to_pe->imagebase, from_ip, to_ip);
 			}
 		}
 	}
@@ -1162,7 +1163,7 @@ bool rk_win_init_per_vcpu(void)
 		return true;
 	}
 
-	//rk_win_setdebugregister();
+	rk_win_setdebugregister();
 	printf("[RKAnalyzer]CPU %d Initialized.\n", get_cpu_id());
 	
 	return true;

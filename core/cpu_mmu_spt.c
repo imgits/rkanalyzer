@@ -2390,8 +2390,15 @@ cpu_mmu_spt_pagefault (ulong err, ulong cr2)
 	int i;
 #ifdef RK_ANALYZER
 	enum rk_result rk_res;
+/*
 	pmap_t m;
 	u64 pte;
+	u64 pde;
+	u64 pdpte;
+	u64 oldpte;
+	u64 oldpde;
+	u64 oldpdpte;
+*/
 	ulong ip;
 	bool no_wr_fault_dispatch = false;
 	struct rk_tf_state *p_rk_tf = current->vmctl.get_struct_rk_tf();
@@ -2427,7 +2434,7 @@ cpu_mmu_spt_pagefault (ulong err, ulong cr2)
 		//Modified by Tyrael here.
 		//Only Intercept in supervisor mode,and Present pages.
 		//Not Accessible in SPT but Accessible in GPT
-		if(p_rk_tf->initialized && wr && (!us) && (err & PAGEFAULT_ERR_P_BIT)){	
+		if(p_rk_tf->initialized && wr && (!us) && (err & PAGEFAULT_ERR_P_BIT) && (current->current_spt_index != KERNEL_LEGAL_SPT)){	
 			current->vmctl.read_ip(&ip);	
 			rk_res = rk_callfunc_if_addr_protected(cr2, false);
 			if((rk_res == RK_UNPROTECTED_IN_PROTECTED_AREA) || (rk_res == RK_PROTECTED) || (rk_res == RK_PROTECTED_BYSYSTEM)){
@@ -2449,7 +2456,21 @@ cpu_mmu_spt_pagefault (ulong err, ulong cr2)
 			rk_check_code_mmvarange(cr2);
 		}
 #endif
-	
+
+/*
+		rk_res = rk_callfunc_if_addr_protected(cr2, false);
+		if((rk_res == RK_UNPROTECTED_IN_PROTECTED_AREA) || (rk_res == RK_PROTECTED)){
+			pmap_open_vmm (&m, current->spt_array[KERNEL_LEGAL_SPT].cr3tbl_phys, current->spt_array[KERNEL_LEGAL_SPT].levels);
+				pmap_seek(&m, cr2, 3);
+				oldpdpte = pmap_read(&m);
+				pmap_seek(&m, cr2, 2);
+				oldpde = pmap_read(&m);
+				pmap_seek(&m, cr2, 1);
+				oldpte = pmap_read(&m);
+				pmap_close(&m);
+		}
+*/
+		
 		set_m1 (entries[0], wr, us, wp, &m1);
 		set_m2 (entries, levels, m2);
 		set_gfns (entries, levels, gfns);
@@ -2469,6 +2490,23 @@ cpu_mmu_spt_pagefault (ulong err, ulong cr2)
 			if((p_rk_tf->initialized) && (p_rk_tf->nx_enable)){
 				rk_manipulate_code_mmvarange_if_need(cr2, gfns[0]);
 			}
+/*			
+			rk_res = rk_callfunc_if_addr_protected(cr2, false);
+			if((rk_res == RK_UNPROTECTED_IN_PROTECTED_AREA) || (rk_res == RK_PROTECTED)){
+				pmap_open_vmm (&m, current->spt_array[KERNEL_LEGAL_SPT].cr3tbl_phys, current->spt_array[KERNEL_LEGAL_SPT].levels);
+				pmap_seek(&m, cr2, 3);
+				pdpte = pmap_read(&m);
+				pmap_seek(&m, cr2, 2);
+				pde = pmap_read(&m);
+				pmap_seek(&m, cr2, 1);
+				pte = pmap_read(&m);
+				//printf("[CPU%d]Current SPT = %d, pte = %llX, pde = %llX, pdpte = %llX\noldpte = %llX, oldpde = %llX, oldpdpte = %llX\n  p = %d, wr = %d, us = %d, ex = %d, wp = %d\ncr2 = %lX, entries = %llX, %llX, %llX, %llX, %llX\n"
+				//, get_cpu_id(), current->current_spt_index, pte, pde, pdpte, oldpte, oldpde, oldpdpte, (err & PAGEFAULT_ERR_P_BIT), wr, us, ex, wp, cr2, 
+				//entries[0], entries[1], entries[2], entries[3], entries[4]);
+				pmap_close(&m);
+			}
+*/
+
 #endif
 		}
 		mmio_unlock ();

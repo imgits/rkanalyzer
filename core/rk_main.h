@@ -167,8 +167,9 @@ bool rk_try_setup_per_vcpu(void);
 
 void toogle_debug_print(void);
 bool is_debug(void);
-int dbgprint(const char *format, ...);
-
+int dbgprint(const char *format, ...)
+	__attribute__ ((format (printf, 1, 2)));
+	
 #endif
 
 #endif

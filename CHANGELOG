@@ -16,3 +16,13 @@
 [2009.12.12] Add minor fix for security issues. Including: [1]Original Protect Area remapped to another Original Area. [2]When guest modified Page table and used invlpg to refresh the TLB. The program will now maintain the protect area in issues above.
 
 [2009.12.12] Add lock to mm_protect_area operations. Now the it works well on MP System.
+
+[2010.01.18] Happy New Year! It has been a long time since i changed this doc last time.
+	Many new features have been added to RKAnalyzer during the month. Including:
+	1. Dynamic Kernel Heap Protecting(wow!)
+	2. Call Tracing.
+	
+	Kernel Heap Tracing is a hard issue mainly because we don't know what to protect. So I monitored the alloc and free functions for Windows Kernel Heap. They are: ExAllocatePoolWithTag and ExFreePoolWithTag. I used Debug Register to monitor it.
+	Some tricks during my work is how to obtain the return value of ExAllocatePoolWithTag. Although the calling parameter can be fetched from the stack, we can't do that with return value, since it is not on the stack for _stdcall; it is in the EAX register after the function return! But it's hard to monitor the function return. I set another debug register to the return address, which has been read from the stack when the function was called. But it's not over; we can't expect for serial control-flow: there are interrupts! So we have a trick here: we think in the same thread would have a serial control-flow.So we record the return address for each thread that is calling ExAllocatePoolWithTag, and switch the debug register when thread switchs. Thread switch is monitored through setting debug register to SwapContext.
+	In a single thread, there could still be exceptions and interrupts; in ISR the ExAllocatePoolWithTag may be called. So we have a return address stack for each thread, and pop the value to debug register to handle nested ExAllocatePoolWithTag correctly.
+	
