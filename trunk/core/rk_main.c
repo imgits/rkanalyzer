@@ -52,7 +52,7 @@ int dbgprint(const char *format, ...)
 	
 	if(is_debug_print){
 		va_start(ap, format);
-		r = printf(format, ap);
+		r = vprintf(format, ap);
 		va_end(ap);
 	}
 	
@@ -117,6 +117,50 @@ rk_init_vcpu (void)
 	rk_tf->disable_protect = false;
 	rk_tf->nx_enable = false;
 	spinlock_init(&(rk_tf->init_lock));
+}
+
+static void rk_mark_page_readonly_single(unsigned int spt_index, virt_t addr)
+{
+	u64 pte;
+	pmap_t m;
+	
+	if((spt_index < 0) || (spt_index >= NUM_OF_SPT))
+		return;
+	
+	pmap_open_vmm (&m, current->spt_array[spt_index].cr3tbl_phys, current->spt_array[spt_index].levels);
+	pmap_seek (&m, addr, 1);
+	pte = pmap_read(&m);
+	pte = pte & (~PTE_RW_BIT);
+	pmap_write (&m, pte, 0xFFF);
+	pmap_close(&m);
+}
+
+static void rk_unmark_page_readonly_single(unsigned int spt_index, virt_t addr)
+{
+	u64 pte;
+	pmap_t m;
+	
+	if((spt_index < 0) || (spt_index >= NUM_OF_SPT))
+		return;
+	
+	pmap_open_vmm (&m, current->spt_array[spt_index].cr3tbl_phys, current->spt_array[spt_index].levels);
+	pmap_seek (&m, addr, 1);
+	pte = pmap_read(&m);
+	pte = pte | PTE_RW_BIT;
+	pmap_write (&m, pte, 0xFFF);
+	pmap_close(&m);
+}
+
+static void rk_mark_page_readonly_batch(virt_t currentaddr){
+	//rk_unmark_page_readonly_single(KERNEL_LEGAL_SPT, currentaddr);
+	rk_mark_page_readonly_single(KERNEL_ILLEGAL_SPT, currentaddr);
+	rk_mark_page_readonly_single(USER_SPT, currentaddr);
+}
+
+static void rk_unmark_page_readonly_batch(virt_t currentaddr){
+	//rk_unmark_page_readonly_single(KERNEL_LEGAL_SPT, currentaddr);
+	rk_unmark_page_readonly_single(KERNEL_ILLEGAL_SPT, currentaddr);
+	rk_unmark_page_readonly_single(USER_SPT, currentaddr);
 }
 
 static struct mm_protected_page* rk_get_page_by_pfn(ulong pfn)
@@ -203,7 +247,7 @@ static void rk_scan_for_pages_and_add_by_gfns(u64 gfns, struct mm_protected_page
 		return;
 	}
 
-	pmap_open_vmm (&m, current->spt_array[KERNEL_ILLEGAL_SPT].cr3tbl_phys, current->spt_array[KERNEL_ILLEGAL_SPT].levels);
+	pmap_open_vmm (&m, current->spt_array[current->current_spt_index].cr3tbl_phys, current->spt_array[current->current_spt_index].levels);
 	currentaddr = 0;
 	while(currentaddr < 0xFFFFFFFF){
 		pmap_seek (&m, currentaddr, 1);
@@ -220,11 +264,7 @@ static void rk_scan_for_pages_and_add_by_gfns(u64 gfns, struct mm_protected_page
 				}else{
 					page_samegfns->page_wr_setbysystem = true;
 				}
-				pte = pte & (~PTE_RW_BIT);
-#ifndef NO_WR_SET
-				if(!(current->vmctl.get_struct_rk_tf()->disable_protect))
-					pmap_write (&m, pte, 0xFFF);
-#endif
+				rk_mark_page_readonly_batch(currentaddr);
 			}
 		}
 
@@ -310,7 +350,7 @@ mmprotect_callback callback_func, ulong *properties, int properties_count)
 	}
 	LIST1_ADD(list_varanges, varange);
 
-	pmap_open_vmm (&m, current->spt_array[KERNEL_ILLEGAL_SPT].cr3tbl_phys, current->spt_array[KERNEL_ILLEGAL_SPT].levels);
+	pmap_open_vmm (&m, current->spt_array[current->current_spt_index].cr3tbl_phys, current->spt_array[current->current_spt_index].levels);
 
 	currentaddr = startaddr;
 	while(currentaddr <= endaddr){
@@ -341,11 +381,7 @@ mmprotect_callback callback_func, ulong *properties, int properties_count)
 					}else{
 						page->page_wr_setbysystem = true;
 					}
-					pte = pte & (~PTE_RW_BIT);
-#ifndef NO_WR_SET
-					if(!(current->vmctl.get_struct_rk_tf()->disable_protect))
-						pmap_write (&m, pte, 0xFFF);
-#endif
+					rk_mark_page_readonly_batch(currentaddr);
 
 					page->gfns = (pte & PTE_ADDR_MASK64) >> PAGESIZE_SHIFT;
 					page->never_paged_in_yet = false;
@@ -429,7 +465,7 @@ static void check_page_samegfns_list_for_delete(struct mm_protected_page_samegfn
 	pmap_t m;
 
 	if(list->refcount <= 0){
-		pmap_open_vmm (&m, current->spt_array[KERNEL_ILLEGAL_SPT].cr3tbl_phys, current->spt_array[KERNEL_ILLEGAL_SPT].levels);
+		pmap_open_vmm (&m, current->spt_array[current->current_spt_index].cr3tbl_phys, current->spt_array[current->current_spt_index].levels);
 		LIST1_FOREACH_DELETABLE (list->pages_of_samegfns, page_samegfns, page_samegfns_n){
 			LIST1_DEL(list->pages_of_samegfns, page_samegfns);
 			pmap_seek (&m, page_samegfns->pfn << PAGESIZE_SHIFT, 1);
@@ -437,10 +473,7 @@ static void check_page_samegfns_list_for_delete(struct mm_protected_page_samegfn
 			if(pte & PTE_P_BIT){
 				if(!(page_samegfns->page_wr_setbysystem)){
 					//restore W/R bit
-					pte = pte | (PTE_RW_BIT);
-#ifndef NO_WR_SET
-					pmap_write (&m, pte, 0xFFF);
-#endif
+					rk_unmark_page_readonly_batch(page_samegfns->pfn << PAGESIZE_SHIFT);
 				}
 				free(page_samegfns);
 			}
@@ -459,17 +492,14 @@ static void check_page_for_delete(struct mm_protected_page *page, bool forcepres
 
 	if(LIST2_EMPTY(page->areas_in_page)){
 		if(!(page->never_paged_in_yet)){
-			pmap_open_vmm (&m, current->spt_array[KERNEL_ILLEGAL_SPT].cr3tbl_phys, current->spt_array[KERNEL_ILLEGAL_SPT].levels);
+			pmap_open_vmm (&m, current->spt_array[current->current_spt_index].cr3tbl_phys, current->spt_array[current->current_spt_index].levels);
 			pmap_seek (&m, page->pfn << PAGESIZE_SHIFT, 1);
 			pte = pmap_read(&m);
 			if((pte & PTE_P_BIT) || (forcepresent))  {
 				if(pte & PTE_P_BIT){
 					if(!(page->page_wr_setbysystem)){
 						//restore W/R bit
-						pte = pte | (PTE_RW_BIT);
-#ifndef NO_WR_SET
-						pmap_write (&m, pte, 0xFFF);
-#endif
+						rk_unmark_page_readonly_batch(page->pfn << PAGESIZE_SHIFT);
 					}
 				}
 				page->p_page_samegfns_list->refcount --;
@@ -574,18 +604,14 @@ static void update_RW_for_page(struct mm_protected_page *page)
 	u64 pte;
 	pmap_t m;
 
-	pmap_open_vmm (&m, current->spt_array[KERNEL_ILLEGAL_SPT].cr3tbl_phys, current->spt_array[KERNEL_ILLEGAL_SPT].levels);
+	pmap_open_vmm (&m, current->spt_array[current->current_spt_index].cr3tbl_phys, current->spt_array[current->current_spt_index].levels);
 	pmap_seek (&m, (page->pfn << PAGESIZE_SHIFT), 1);
 	pte = pmap_read(&m);
 	if(pte & PTE_P_BIT) {
 		if((pte & PTE_RW_BIT) != 0){
 			page->page_wr_setbysystem = false;
 		}
-		pte = pte & (~PTE_RW_BIT);
-#ifndef NO_WR_SET
-		if(!(current->vmctl.get_struct_rk_tf()->disable_protect))
-			pmap_write (&m, pte, 0xFFF);
-#endif
+		rk_mark_page_readonly_batch(page->pfn << PAGESIZE_SHIFT);
 	}
 	else {
 		//The page is not present now.
@@ -600,18 +626,14 @@ static void update_RW_for_page_samegfns(struct mm_protected_page_samegfns *page_
 	u64 pte;
 	pmap_t m;
 
-	pmap_open_vmm (&m, current->spt_array[KERNEL_ILLEGAL_SPT].cr3tbl_phys, current->spt_array[KERNEL_ILLEGAL_SPT].levels);
+	pmap_open_vmm (&m, current->spt_array[current->current_spt_index].cr3tbl_phys, current->spt_array[current->current_spt_index].levels);
 	pmap_seek (&m, (page_samegfns->pfn << PAGESIZE_SHIFT), 1);
 	pte = pmap_read(&m);
 	if(pte & PTE_P_BIT) {
 		if((pte & PTE_RW_BIT) != 0){
 			page_samegfns->page_wr_setbysystem = false;
 		}
-		pte = pte & (~PTE_RW_BIT);
-#ifndef NO_WR_SET
-		if(!(current->vmctl.get_struct_rk_tf()->disable_protect))
-			pmap_write (&m, pte, 0xFFF);
-#endif
+		rk_mark_page_readonly_batch((page_samegfns->pfn << PAGESIZE_SHIFT));
 	}
 	else {
 		//The page is not present now.
@@ -631,16 +653,13 @@ static void try_delay_release(virt_t addr)
 	LIST1_FOREACH_DELETABLE (list_delay_release_pages, page_samegfns, page_samegfns_n){
 		if(page_samegfns->pfn == (addr >> PAGESIZE_SHIFT)){
 			LIST1_DEL (list_delay_release_pages, page_samegfns);
-			pmap_open_vmm (&m, current->spt_array[KERNEL_ILLEGAL_SPT].cr3tbl_phys, current->spt_array[KERNEL_ILLEGAL_SPT].levels);
+			pmap_open_vmm (&m, current->spt_array[current->current_spt_index].cr3tbl_phys, current->spt_array[current->current_spt_index].levels);
 			pmap_seek (&m, (page_samegfns->pfn << PAGESIZE_SHIFT), 1);
 			pte = pmap_read(&m);
 			if(pte & PTE_P_BIT) {
 				if(!(page_samegfns->page_wr_setbysystem)){
 					//restore W/R bit
-					pte = pte | (PTE_RW_BIT);
-#ifndef NO_WR_SET
-					pmap_write (&m, pte, 0xFFF);
-#endif
+					rk_unmark_page_readonly_batch(page_samegfns->pfn << PAGESIZE_SHIFT);
 				}
 				free(page_samegfns);
 			}
@@ -754,16 +773,13 @@ void rk_manipulate_mmarea_if_need(virt_t newvirtaddr, u64 gfns){
 				if((page_by_gfns = get_page_by_gfns(gfns, NULL)) == NULL){
 					//Route 3
 					LIST1_DEL(page_samegfns->list_belong->pages_of_samegfns, page_samegfns);
-					pmap_open_vmm (&m, current->spt_array[KERNEL_ILLEGAL_SPT].cr3tbl_phys, current->spt_array[KERNEL_ILLEGAL_SPT].levels);
+					pmap_open_vmm (&m, current->spt_array[current->current_spt_index].cr3tbl_phys, current->spt_array[current->current_spt_index].levels);
 					pmap_seek (&m, (page_samegfns->pfn << PAGESIZE_SHIFT), 1);
 					pte = pmap_read(&m);
 					if(pte & PTE_P_BIT) {
 						if(!(page_samegfns->page_wr_setbysystem)){
 							//restore W/R bit
-							pte = pte | (PTE_RW_BIT);
-#ifndef NO_WR_SET
-							pmap_write (&m, pte, 0xFFF);
-#endif
+							rk_unmark_page_readonly_batch((page_samegfns->pfn << PAGESIZE_SHIFT));
 						}
 						free(page_samegfns);
 					}
@@ -797,7 +813,7 @@ void rk_manipulate_mmarea_if_need(virt_t newvirtaddr, u64 gfns){
 				page_samegfns->list_belong = page_by_gfns->p_page_samegfns_list;
 				LIST1_ADD(page_by_gfns->p_page_samegfns_list->pages_of_samegfns, page_samegfns);
 
-				pmap_open_vmm (&m, current->spt_array[KERNEL_ILLEGAL_SPT].cr3tbl_phys, current->spt_array[KERNEL_ILLEGAL_SPT].levels);
+				pmap_open_vmm (&m, current->spt_array[current->current_spt_index].cr3tbl_phys, current->spt_array[current->current_spt_index].levels);
 				pmap_seek (&m, (page_samegfns->pfn << PAGESIZE_SHIFT), 1);
 				pte = pmap_read(&m);
 				if(pte & PTE_P_BIT) {
@@ -806,11 +822,7 @@ void rk_manipulate_mmarea_if_need(virt_t newvirtaddr, u64 gfns){
 					}else{
 						page_samegfns->page_wr_setbysystem = true;
 					}
-					pte = pte & (~PTE_RW_BIT);
-#ifndef NO_WR_SET
-					if(!(current->vmctl.get_struct_rk_tf()->disable_protect))
-						pmap_write (&m, pte, 0xFFF);
-#endif
+					rk_mark_page_readonly_batch((page_samegfns->pfn << PAGESIZE_SHIFT));
 				}
 				else
 				{
@@ -951,7 +963,7 @@ void rk_ret_from_tf(bool was_instruction_carried_out)
 				val = 0xBAD0BEEF;
 			}
 			rk_callfunc_if_addr_protected(p_rk_tf->addr, true);
-			printf("[RKAnalyzer][Report]LastEIP = 0x%lX, CurrentEIP = 0x%lX\n", p_rk_tf->last_eip, ip);
+			printf("[RKAnalyzer][Report]LastEIP = 0x%lX, CurrentEIP = 0x%lX, Curernt.SPT = %d\n", p_rk_tf->last_eip, ip, current->current_spt_index);
 			printf("[RKAnalyzer][Report]Addr = 0x%lX, LastValue = 0x%lX, CurrentValue = 0x%lX\n", p_rk_tf->addr, p_rk_tf->originalval, val);
 		}
 	}
