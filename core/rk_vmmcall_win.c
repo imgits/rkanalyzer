@@ -44,7 +44,7 @@ struct guest_win_pe_section{
 
 struct guest_win_pe_symbol{
 	LIST1_DEFINE (struct guest_win_pe_symbol);
-	ulong va;
+	ulong va;	//absolute va, not rva
 	char name[NAME_MAXLEN];
 };
 
@@ -97,7 +97,7 @@ static LIST1_DEFINE_HEAD (struct guest_win_exallocatepoolwithtag_call_info_stack
 static bool
 guest64 (void)
 {
-	u64 efer;
+	u64 efer = 0;
 
 	current->vmctl.read_msr (MSR_IA32_EFER, &efer);
 	if (efer & MSR_IA32_EFER_LMA_BIT)
@@ -116,7 +116,7 @@ static inline void init_pe_struct(struct guest_win_pe *p_pe)
 
 static void rk_win_call_info_check_watchdog(bool increment)
 {
-	ulong temp;
+	ulong temp = 0;
 	
 	spinlock_lock(&call_info_watchdog_lock);
 	if(increment){
@@ -146,7 +146,7 @@ static void rk_win_call_info_check_watchdog(bool increment)
 
 static bool rk_win_getentryaddrbyname(const char *name, virt_t *pEntrypoint)
 {
-	struct guest_win_pe_symbol *func;
+	struct guest_win_pe_symbol *func = NULL;
 
 	LIST1_FOREACH (kernel_pe.list_code_symbols, func) {
 		if(strcmp(func->name, (char *)name) == 0){
@@ -158,9 +158,40 @@ static bool rk_win_getentryaddrbyname(const char *name, virt_t *pEntrypoint)
 	return false;
 }
 
+static struct guest_win_pe_symbol* rk_win_getsymbolbyentry_precise(virt_t pEntrypoint)
+{
+	struct guest_win_pe_symbol *func = NULL;
+
+	LIST1_FOREACH (kernel_pe.list_code_symbols, func) {
+		if(pEntrypoint == func->va){
+			return func;
+		}
+	}
+
+	return NULL;
+}
+
+static struct guest_win_pe_symbol* rk_win_getsymbolbyentry(virt_t pEntrypoint)
+{
+	struct guest_win_pe_symbol *func = NULL;
+	struct guest_win_pe_symbol *ret_func = NULL;
+	ulong diff = 0xFFFFFFFF;
+
+	LIST1_FOREACH (kernel_pe.list_code_symbols, func) {
+		if(pEntrypoint >= func->va){
+			if((pEntrypoint - func->va) < diff){
+				diff = (pEntrypoint - func->va);
+				ret_func = func;
+			}
+		}
+	}
+
+	return ret_func;
+}
+
 static bool rk_win_is_system_code(virt_t inst_addr)
 {
-	struct guest_win_pe_section *section;
+	struct guest_win_pe_section *section = NULL;
 
 	LIST1_FOREACH (kernel_pe.list_sections, section) {
 		if(((section->characteristics & IMAGE_SCN_MEM_EXECUTE) != 0) && 
@@ -175,7 +206,7 @@ static bool rk_win_is_system_code(virt_t inst_addr)
 
 static bool rk_win_is_code_in_pe(struct guest_win_pe *p_pe, virt_t inst_addr)
 {
-	struct guest_win_pe_section *section;
+	struct guest_win_pe_section *section = NULL;
 
 	LIST1_FOREACH (p_pe->list_sections, section) {
 		if(((section->characteristics & IMAGE_SCN_MEM_EXECUTE) != 0) && 
@@ -190,8 +221,8 @@ static bool rk_win_is_code_in_pe(struct guest_win_pe *p_pe, virt_t inst_addr)
 
 static struct guest_win_pe* rk_win_get_pe_from_code_addr(virt_t inst_addr)
 {
-	struct guest_win_pe_section *section;
-	struct guest_win_pe *pe;
+	struct guest_win_pe_section *section = NULL;
+	struct guest_win_pe *pe = NULL;
 	
 	LIST1_FOREACH (list_pes, pe){
 		LIST1_FOREACH (pe->list_sections, section) {
@@ -208,13 +239,16 @@ static struct guest_win_pe* rk_win_get_pe_from_code_addr(virt_t inst_addr)
 
 static bool rk_win_fill_ldr_data(virt_t baseaddr, LDR_DATA_TABLE_ENTRY32 *ldr_data)
 {
-	unsigned char *p_buf;
+	unsigned char *p_buf = NULL;
 	LIST_ENTRY32 current_entry;
-	u32 head_addr;
+	u32 head_addr = 0;
 	LDR_DATA_TABLE_ENTRY32 current_ldr_data;
-	ulong addr, addr2;
-	int i;
+	ulong addr = 0, addr2 = 0;
+	int i = 0;
 	int err = 0;
+	
+	memset(&current_entry, 0, sizeof(LIST_ENTRY32));
+	memset(&current_ldr_data, 0, sizeof(LDR_DATA_TABLE_ENTRY32));
 	
 	addr = kernelbase + PSLOADEDMODULELIST_OFFSET_IN_KERNEL;
 	p_buf = (unsigned char *)&current_entry;
@@ -250,16 +284,18 @@ failed:
 
 static bool rk_win_is_addr_in_idt(virt_t addr, ulong *entry_index)
 {
-	int err;
-	ulong idt_base, idt_limit;
-	ulong gdt_base, gdt_limit, gdt_offset;
-	ulong ldt_accessright;
-	ulong current_offset, current_index;
+	int err = 0;
+	ulong idt_base = 0, idt_limit = 0;
+	ulong gdt_base = 0, gdt_limit = 0, gdt_offset = 0;
+	ulong ldt_accessright = 0;
+	ulong current_offset = 0, current_index = 0;
 	struct gatedesc32 idt_desc32;
 	struct segdesc gdt_desc32;
-	bool is_guest_64;
-	size_t idt_entry_size;
+	bool is_guest_64 = false;
+	size_t idt_entry_size = 0;
 	
+	memset(&idt_desc32, 0, sizeof(struct gatedesc32));
+	memset(&gdt_desc32, 0, sizeof(struct segdesc));
 	is_guest_64 = guest64();
 	idt_entry_size = (is_guest_64 ? 16 : 8);
 	current->vmctl.read_idtr(&idt_base, &idt_limit);
@@ -305,7 +341,7 @@ static bool rk_win_is_addr_in_idt(virt_t addr, ulong *entry_index)
 
 static ulong rk_win_get_current_kthread_addr()
 {
-	ulong kpcr;
+	ulong kpcr = 0;
 	ulong retval = 0;
 	
 	current->vmctl.read_sreg_base(SREG_FS, &kpcr);
@@ -319,9 +355,9 @@ static ulong rk_win_get_current_kthread_addr()
 
 static struct guest_win_exallocatepoolwithtag_call_info* rk_win_get_call_info_by_kthread_addr(ulong kthread_addr, bool pop)
 {
-	struct guest_win_exallocatepoolwithtag_call_info_stack* call_info_stack;
-	struct guest_win_exallocatepoolwithtag_call_info_stack* call_info_stack_n;
-	struct guest_win_exallocatepoolwithtag_call_info* call_info;
+	struct guest_win_exallocatepoolwithtag_call_info_stack* call_info_stack = NULL;
+	struct guest_win_exallocatepoolwithtag_call_info_stack* call_info_stack_n = NULL;
+	struct guest_win_exallocatepoolwithtag_call_info* call_info = NULL;
 	
 	spinlock_lock(&call_info_access_lock);
 	LIST1_FOREACH_DELETABLE(list_call_info, call_info_stack, call_info_stack_n){
@@ -355,7 +391,7 @@ static struct guest_win_exallocatepoolwithtag_call_info* rk_win_get_call_info_by
 
 static void rk_win_add_call_info_by_kthread_addr(ulong kthread_addr, struct guest_win_exallocatepoolwithtag_call_info* call_info){
 
-	struct guest_win_exallocatepoolwithtag_call_info_stack* call_info_stack;
+	struct guest_win_exallocatepoolwithtag_call_info_stack* call_info_stack = NULL;
 	
 	spinlock_lock(&call_info_access_lock);
 	LIST1_FOREACH(list_call_info, call_info_stack){
@@ -378,10 +414,10 @@ static void rk_win_add_call_info_by_kthread_addr(ulong kthread_addr, struct gues
 //Use DR0 and DR2, DR3 here.
 static void rk_win_setdebugregister()
 {
-	virt_t pCallEntry;
-	virt_t pCallEntry_2;
-	virt_t res;
-	ulong dr7;
+	virt_t pCallEntry = 0;
+	virt_t pCallEntry_2 = 0;
+	virt_t res = 0;
+	ulong dr7 = 0;
 	struct rk_tf_state *p_rk_tf = current->vmctl.get_struct_rk_tf();
 
 	if (rk_win_getentryaddrbyname("ExAllocatePoolWithTag", &pCallEntry) && 
@@ -413,8 +449,8 @@ static void rk_win_setdebugregister()
 
 static void rk_win_set_dr1_to_virt(virt_t addr)
 {
-	virt_t res;
-	ulong dr7;
+	virt_t res = 0;
+	ulong dr7 = 0;
 	struct rk_tf_state *p_rk_tf = current->vmctl.get_struct_rk_tf();
 
 	asm volatile ("mov %%db1, %0" : "=r"(res));
@@ -430,7 +466,7 @@ static void rk_win_set_dr1_to_virt(virt_t addr)
 
 static void rk_win_remove_dr1()
 {
-	ulong dr7;
+	ulong dr7 = 0;
 	struct rk_tf_state *p_rk_tf = current->vmctl.get_struct_rk_tf();
 
 	p_rk_tf->dr_shadow_flag &= (~(DR_SHADOW_DR1));
@@ -445,7 +481,7 @@ static bool mmprotect_callback_win_pereadonly(struct mm_protected_area *mmarea, 
 {
 	if(display)
 	{
-		printf("[RKAnalyzer][PEReadOnly]Access Violation at 0x%lX\n", addr);
+		printf("[CPU%d][RKAnalyzer][PEReadOnly]Access Violation at 0x%lX\n", get_cpu_id(), addr);
 	}
 	
 	return true;
@@ -453,7 +489,7 @@ static bool mmprotect_callback_win_pereadonly(struct mm_protected_area *mmarea, 
 
 static bool mmprotect_callback_win_kernelheap(struct mm_protected_area *mmarea, virt_t addr, bool display)
 {
-	ulong ip;
+	ulong ip = 0;
 
 	if(display)
 	{
@@ -461,9 +497,10 @@ static bool mmprotect_callback_win_kernelheap(struct mm_protected_area *mmarea, 
 		
 		if(!(rk_win_is_system_code(ip)))
 		{
-			dbgprint("[RKAnalyzer][KernelHeap]Access Violation at 0x%lX, eip = 0x%lX\n", addr, ip);
 			if(mmarea->varange->properties != NULL){
-				dbgprint("[RKAnalyzer][KernelHeap]Heap Info: Allocer = 0x%lX, Type = 0x%lX, Tag = 0x%lX, Size = 0x%lX\n", 
+				dbgprint("[CPU%d][RKAnalyzer][KernelHeap]Access Violation at 0x%lX+0x%lX\n", get_cpu_id(), 
+				mmarea->varange->properties[PROPERTY_ALLOCADDR], addr - mmarea->varange->properties[PROPERTY_ALLOCADDR]);
+				dbgprint("[CPU%d][RKAnalyzer][KernelHeap]Heap Info: Allocer = 0x%lX, Type = 0x%lX, Tag = 0x%lX, Size = 0x%lX\n", get_cpu_id(), 
 					mmarea->varange->properties[PROPERTY_CALLERADDR], mmarea->varange->properties[PROPERTY_POOLTYPE], 
 					mmarea->varange->properties[PROPERTY_TAG], mmarea->varange->properties[PROPERTY_ALLOCSIZE]);
 			}
@@ -487,12 +524,15 @@ static bool mmcode_callback_general (struct mm_code_varange* mmvarange, virt_t a
 
 static void rk_win_dr_dispatch(int debug_num)
 {
-	ulong esp, eax, ppool, edi, esi;
+	ulong esp = 0, eax = 0, ppool = 0, edi = 0, esi = 0;
 //	struct guest_win_obcreateobject_call_info call_info;
 	struct guest_win_exallocatepoolwithtag_call_info call_info;
 	struct guest_win_exallocatepoolwithtag_call_info *exalloc_call_info;
 	ulong properties[10];
 	struct rk_tf_state *p_rk_tf = current->vmctl.get_struct_rk_tf();
+
+	memset(&call_info, 0, sizeof(struct guest_win_exallocatepoolwithtag_call_info));
+	memset(properties, 0, sizeof(ulong) * 10);
 
 	switch(debug_num){
 	case 0:
@@ -646,16 +686,19 @@ static void rk_win_build_pe_base_filter()
 	//Dump all exported functions.
 	ulong pebase = 0;
 	ulong buf = 0;
-	struct guest_win_pe_base_filter *p_pe_base_filter;
+	struct guest_win_pe_base_filter *p_pe_base_filter = NULL;
 	
 	//Try Find in PsLoadedModuleList First
-	unsigned char *p_buf;
+	unsigned char *p_buf = NULL;
 	LIST_ENTRY32 current_entry;
-	u32 head_addr;
+	u32 head_addr = 0;
 	LDR_DATA_TABLE_ENTRY32 current_ldr_data;
-	ulong addr, addr2;
-	int i;
+	ulong addr = 0, addr2 = 0;
+	int i = 0;
 	int err = 0;
+	
+	memset(&current_entry, 0, sizeof(LIST_ENTRY32));
+	memset(&current_ldr_data, 0, sizeof(LDR_DATA_TABLE_ENTRY32));
 	
 	addr = kernelbase + PSLOADEDMODULELIST_OFFSET_IN_KERNEL;
 	p_buf = (unsigned char *)&current_entry;
@@ -714,7 +757,7 @@ static bool rk_win_readfromguest(struct guest_win_pe *p_pe, bool scankernel, vir
 {
 	//Parse the PE Section
 	//Dump all exported functions.
-	int i,j;
+	int i = 0,j = 0;
 	int step = 0;
 	int err = 0;
 	ulong pebase = 0;
@@ -728,14 +771,20 @@ static bool rk_win_readfromguest(struct guest_win_pe *p_pe, bool scankernel, vir
 	char strbuf[NAME_MAXLEN];
 	unsigned char* buf_2 = (unsigned char*)&Export;
 	bool succeed = false;
-	struct guest_win_pe_symbol *function;
-	struct guest_win_pe_section *section;
+	struct guest_win_pe_symbol *function = NULL;
+	struct guest_win_pe_section *section = NULL;
 	ulong addr_section_header = 0;
 	u16 numberOfSections = 0;
 	IMAGE_SECTION_HEADER section_header;
 	unsigned char* p_section_header = (unsigned char*)&section_header;
 	u8 sectionName[IMAGE_SIZEOF_SHORT_NAME + 1];
 	LDR_DATA_TABLE_ENTRY32 ldr_data;
+	
+	memset(&Export, 0, sizeof(IMAGE_EXPORT_DIRECTORY));
+	memset(&section_header, 0, sizeof(IMAGE_SECTION_HEADER));
+	memset(&ldr_data, 0, sizeof(LDR_DATA_TABLE_ENTRY32));
+	memset(strbuf, 0, sizeof(char) * NAME_MAXLEN);
+	memset(sectionName, 0, sizeof(char) * (IMAGE_SIZEOF_SHORT_NAME + 1));
 	
 	if(p_pe == NULL)
 	{
@@ -976,7 +1025,7 @@ init_failed:
 
 static void rk_win_protectpereadonlysections(struct guest_win_pe *p_pe)
 {
-	struct guest_win_pe_section *section;
+	struct guest_win_pe_section *section = NULL;
 
 	if(p_pe == NULL){
 		return;
@@ -997,9 +1046,9 @@ static void rk_win_protectpereadonlysections(struct guest_win_pe *p_pe)
 
 static enum rk_code_type rk_win_unknown_code_check_dispatch(virt_t addr)
 {
-	struct guest_win_pe_section *section;
-	struct guest_win_pe *pe;
-	struct guest_win_pe_base_filter *p_pe_base_filter;
+	struct guest_win_pe_section *section = NULL;
+	struct guest_win_pe *pe = NULL;
+	struct guest_win_pe_base_filter *p_pe_base_filter = NULL;
 	bool in_filter = false;
 	
 	if((pe = rk_win_get_pe_from_code_addr(addr)) != NULL){
@@ -1056,12 +1105,13 @@ static void rk_win_switch_print_dispatch(virt_t from_ip, virt_t to_ip)
 	//from_ip in kernel, to_ip in rootkit
 	//branch type 1,2,3,4,6
 	
-	struct guest_win_pe_base_filter *p_pe_base_filter;
-	struct guest_win_pe *p_from_pe, *p_to_pe;
+	struct guest_win_pe_base_filter *p_pe_base_filter = NULL;
+	struct guest_win_pe *p_from_pe, *p_to_pe = NULL;
+	struct guest_win_pe_symbol *p_symbol = NULL;
 	bool in_filter = false;
-	ulong idt_index;
-	u8 inst;
-	int err;
+	ulong idt_index = 0;
+	u8 inst = 0;
+	int err = 0;
 	
 	if(rk_win_is_system_code(to_ip)){
 		p_to_pe = &kernel_pe;
@@ -1083,8 +1133,23 @@ static void rk_win_switch_print_dispatch(virt_t from_ip, virt_t to_ip)
 				return;
 			}
 			
-			printf("[RKAnalyzer][Rootkit->Kernel][%s+0x%lX->%s+0x%lX][%lX->%lX]\n", p_from_pe->name, from_ip - p_from_pe->imagebase, 
-				p_to_pe->name, to_ip - p_to_pe->imagebase, from_ip, to_ip);
+			p_symbol = rk_win_getsymbolbyentry(to_ip);
+			
+			if(p_symbol == NULL){
+				printf("[CPU%d][RKAnalyzer][Rootkit->Kernel][%s+0x%lX->%s+0x%lX][%lX->%lX]\n", get_cpu_id(), 
+				p_from_pe->name, from_ip - p_from_pe->imagebase, p_to_pe->name, to_ip - p_to_pe->imagebase, from_ip, to_ip);
+			}
+			else{
+				if(p_symbol->va == to_ip){
+					printf("[CPU%d][RKAnalyzer][Rootkit->Kernel][%s+0x%lX->%s+%s][%lX->%lX]\n", get_cpu_id(), 
+					p_from_pe->name, from_ip - p_from_pe->imagebase, p_to_pe->name, p_symbol->name, from_ip, to_ip);
+				}
+				else{
+					printf("[CPU%d][RKAnalyzer][Rootkit->Kernel][%s+0x%lX->%s+0x%lX(%s+0x%lX)][%lX->%lX]\n", get_cpu_id(), 
+					p_from_pe->name, from_ip - p_from_pe->imagebase, p_to_pe->name, to_ip - p_to_pe->imagebase, p_symbol->name,
+					to_ip - p_symbol->va, from_ip, to_ip);
+				}
+			}
 		}
 	}
 	else{
@@ -1109,9 +1174,24 @@ static void rk_win_switch_print_dispatch(virt_t from_ip, virt_t to_ip)
 					}
 				}
 				
+				p_symbol = rk_win_getsymbolbyentry(from_ip);
+								
 				//kernel->rootkit
-				printf("[RKAnalyzer][Kernel->Rootkit][%s+0x%lX->%s+0x%lX][%lX->%lX]\n", p_from_pe->name, from_ip - p_from_pe->imagebase, 
-					p_to_pe->name, to_ip - p_to_pe->imagebase, from_ip, to_ip);
+				if(p_symbol == NULL){
+					printf("[CPU%d][RKAnalyzer][Kernel->Rootkit][%s+0x%lX->%s+0x%lX][%lX->%lX]\n", get_cpu_id(), 
+					p_from_pe->name, from_ip - p_from_pe->imagebase, p_to_pe->name, to_ip - p_to_pe->imagebase, from_ip, to_ip);
+				}
+				else{
+					if(p_symbol->va == from_ip){
+						printf("[CPU%d][RKAnalyzer][Kernel->Rootkit][%s+%s->%s+0x%lX][%lX->%lX]\n", get_cpu_id(), 
+						p_from_pe->name, p_symbol->name, p_to_pe->name, to_ip - p_to_pe->imagebase, from_ip, to_ip);
+					}
+					else{
+						printf("[CPU%d][RKAnalyzer][Kernel->Rootkit][%s+0x%lX(%s+0x%lX)->%s+0x%lX][%lX->%lX]\n", get_cpu_id(), 
+						p_from_pe->name, from_ip - p_from_pe->imagebase, p_symbol->name,
+						from_ip - p_symbol->va, p_to_pe->name, to_ip - p_to_pe->imagebase, from_ip, to_ip);
+					}
+				}
 			}
 		}
 	}
@@ -1127,8 +1207,7 @@ void rk_win_os_dep_setter(void)
 
 bool rk_win_init_global(virt_t base)
 {
-	int i;
-	struct guest_win_pe_section *section;
+	struct guest_win_pe_section *section = NULL;
 	
 	if(!rk_try_setup_global(rk_win_os_dep_setter)){
 		return true;
@@ -1151,10 +1230,6 @@ bool rk_win_init_global(virt_t base)
 	printf("[RKAnalyzer]Global Initialized on CPU %d.\n", get_cpu_id());
 	
 	return true;
-	
-init_failed:
-	printf("[RKAnalyzer]Get Kernel Information Failed!\n");
-	return false;
 }
 
 bool rk_win_init_per_vcpu(void)
@@ -1172,8 +1247,8 @@ bool rk_win_init_per_vcpu(void)
 static void rk_win_init(void)
 {
 	//Get Windows Kernel Address From guest
-	ulong  rbx;
-	virt_t base;
+	ulong  rbx = 0;
+	virt_t base = 0;
 	
 	current->vmctl.read_general_reg (GENERAL_REG_RBX, &rbx);
 	base = (virt_t)rbx;

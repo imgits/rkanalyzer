@@ -40,7 +40,7 @@ static bool is_kernel_page(virt_t addr)
 
 static u16 rk_nx_rd_guest_cpl()
 {
-	u16 retval;
+	u16 retval = 0;
 	current->vmctl.read_sreg_sel(SREG_CS, &retval);
 	return (retval & 0x3);
 }
@@ -53,14 +53,10 @@ void rk_nx_try_setup_global()
 void rk_nx_try_setup_per_vcpu()
 {
 	// Test CPL see whether we are in kernel or user? (Should be in kernel)
-	ulong ip;
-	u64 msrdata;
-	ulong debugctl;
+	ulong ip = 0;
+	u64 msrdata = 0;
+	ulong debugctl = 0;
 	struct rk_tf_state *rk_tf = current->vmctl.get_struct_rk_tf();
-	
-	if(((os_dep.va_kernel_start >> PAGESIZE2M_SHIFT) << PAGESIZE2M_SHIFT) != os_dep.va_kernel_start){
-		panic("Error Init NX: Kernel Start Not Align on 2M Page!\n");
-	}
 	
 	//Enable NXE in MSR_IA32_EFER and set shadow before enable NX Protect
 	current->vmctl.read_msr(MSR_IA32_EFER, &msrdata);
@@ -99,7 +95,11 @@ void rk_nx_try_setup_per_vcpu()
 	{
 		//Flush Page Table
 		cpu_mmu_spt_clearall ();
+#ifdef RK_ANALYZER_NO_USER_TRACE
+		cpu_mmu_spt_switch(KERNEL_LEGAL_SPT);
+#else
 		cpu_mmu_spt_switch(USER_SPT);
+#endif
 	}
 	else
 	{
@@ -111,11 +111,11 @@ static void print_switch_info()
 {
 	//TODO:Support more processor familys
 	//Currently we only support Intel Family 06_17H
-	u64 tos;
-	u64 from_ip, to_ip;
-	u64 perf_msr;
-	ulong debugctl;
-	ulong cs_base;
+	u64 tos = 0;
+	u64 from_ip = 0, to_ip = 0;
+	u64 perf_msr = 0;
+	ulong debugctl = 0;
+	ulong cs_base = 0;
 	
 	current->vmctl.read_msr(MSR_IA32_PERF_CAPABILITIES, &perf_msr);
 	perf_msr &= MSR_IA32_PERF_CAPABILITIES_LBR_MASK;
@@ -146,7 +146,7 @@ static void print_switch_info()
 
 static bool rk_is_code_area_overlapped_with_current_ones(virt_t startaddr, virt_t endaddr, bool display)
 {
-	struct mm_code_varange *varange;
+	struct mm_code_varange *varange = NULL;
 	
 	LIST1_FOREACH (list_code_varanges, varange){
 		if((startaddr >= varange->startaddr) && (startaddr <= varange->endaddr)){
@@ -172,7 +172,7 @@ static bool rk_is_code_area_overlapped_with_current_ones(virt_t startaddr, virt_
 bool rk_add_code_mmvarange_nolock(bool legal, virt_t startaddr, virt_t endaddr, mmcode_callback callback_func)
 {
 
-	struct mm_code_varange *varange;
+	struct mm_code_varange *varange = NULL;
 
 	if(startaddr > endaddr){
 		printf("[RKAnalyzer]Error Add Code Area: Invalid Parameter!\n");
@@ -200,8 +200,8 @@ static bool rk_del_code_mmvarange_core(virt_t startaddr, virt_t endaddr)
 	// Delete All Original Areas in va belongs to [startaddr endaddr]
 	// Also Remove derived areas
 
-	struct mm_code_varange *varange;
-	struct mm_code_varange *varange_n;
+	struct mm_code_varange *varange = NULL;
+	struct mm_code_varange *varange_n = NULL;
 	bool varange_found = false;
 
 	LIST1_FOREACH_DELETABLE (list_code_varanges, varange, varange_n){
@@ -237,7 +237,7 @@ bool rk_del_code_mmvarange(virt_t startaddr, virt_t endaddr)
 
 static void rk_mark_page_nx(unsigned int spt_index, virt_t addr)
 {
-	u64 pte;
+	u64 pte = 0;
 	pmap_t m;
 	
 	if((spt_index < 0) || (spt_index >= NUM_OF_SPT))
@@ -253,7 +253,7 @@ static void rk_mark_page_nx(unsigned int spt_index, virt_t addr)
 
 static void rk_unmark_page_nx(unsigned int spt_index, virt_t addr)
 {
-	u64 pte;
+	u64 pte = 0;
 	pmap_t m;
 	
 	if((spt_index < 0) || (spt_index >= NUM_OF_SPT))
@@ -272,7 +272,7 @@ static struct mm_code_varange* rk_check_code_type_core(virt_t virtaddr)
 
 	//TODO:Add Support for Large Pages(4M)	
 
-	struct mm_code_varange *mmvarange;
+	struct mm_code_varange *mmvarange = NULL;
 
 	//TODO:Add Support for Large Pages(4M)
 	
@@ -290,7 +290,7 @@ static struct mm_code_varange* rk_check_code_type_same_page_core(virt_t virtaddr
 
 	//TODO:Add Support for Large Pages(4M)	
 
-	struct mm_code_varange *mmvarange;
+	struct mm_code_varange *mmvarange = NULL;
 
 	//TODO:Add Support for Large Pages(4M)
 	
@@ -311,8 +311,8 @@ static struct mm_code_varange* rk_check_code_type_same_page_core(virt_t virtaddr
 
 void rk_manipulate_code_mmvarange_if_need(virt_t newvirtaddr, u64 gfns){
 
-	struct mm_code_varange* mmvarange;
-	u16 cpl_current;
+	struct mm_code_varange* mmvarange = NULL;
+	u16 cpl_current = 0;
 	struct rk_tf_state *rk_tf = current->vmctl.get_struct_rk_tf();
 	cpl_current = rk_nx_rd_guest_cpl();
 	
@@ -324,8 +324,10 @@ void rk_manipulate_code_mmvarange_if_need(virt_t newvirtaddr, u64 gfns){
 	//2.newvirtaddr is user
 	
 	if(is_kernel_page(newvirtaddr)){
-	
+
+#ifndef RK_ANALYZER_NO_USER_TRACE
 		rk_mark_page_nx(USER_SPT, newvirtaddr);
+#endif
 		
 		//Route 1
 		spinlock_lock(&mm_code_area_lock);
@@ -349,9 +351,14 @@ void rk_manipulate_code_mmvarange_if_need(virt_t newvirtaddr, u64 gfns){
 		}
 	}
 	else{
+#ifdef RK_ANALYZER_NO_USER_TRACE
+		rk_unmark_page_nx(KERNEL_LEGAL_SPT, newvirtaddr);
+		rk_unmark_page_nx(KERNEL_ILLEGAL_SPT, newvirtaddr);
+#else
 		rk_mark_page_nx(KERNEL_LEGAL_SPT, newvirtaddr);
 		rk_mark_page_nx(KERNEL_ILLEGAL_SPT, newvirtaddr);
 		rk_unmark_page_nx(USER_SPT, newvirtaddr);
+#endif
 	}
 }
 
@@ -382,9 +389,9 @@ enum rk_nx_result rk_check_code_mmvarange(virt_t virtaddr)
 	//
 	// Special: If code_legal_known = false in rk_tf_state, then we should set it here if we in kernel
 	
-	u16 cpl_current;
-	struct mm_code_varange* mmvarange_code;
-	bool legal;
+	u16 cpl_current = 0;
+	struct mm_code_varange* mmvarange_code = NULL;
+	bool legal = false;
 	struct rk_tf_state *rk_tf = current->vmctl.get_struct_rk_tf();
 	
 	cpl_current = rk_nx_rd_guest_cpl();
@@ -395,8 +402,9 @@ enum rk_nx_result rk_check_code_mmvarange(virt_t virtaddr)
 			//Route 1
 			rk_tf->cpl_last = CPL_USER;
 			rk_tf->disable_protect = false;
+#ifndef RK_ANALYZER_NO_USER_TRACE 
 			cpu_mmu_spt_switch(USER_SPT);
-			
+#endif			
 			return RK_NX_K2U;
 		}
 		else if(cpl_current == CPL_KERNEL)
