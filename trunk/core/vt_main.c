@@ -209,7 +209,7 @@ do_exception (void)
 	enum vmmerr err;
 	ulong errc;
 #ifdef RK_ANALYZER
-	ulong fake_dr6;
+	ulong fake_dr6 = 0;
 #endif
 
 	asm_vmread (VMCS_VMEXIT_INTR_INFO, &vii.v);
@@ -453,7 +453,7 @@ static void
 vt__vm_run (void)
 {
 #ifdef RK_ANALYZER
-	ulong rflags;
+	ulong rflags = 0;
 #endif
 	enum vt__status status;
 
@@ -501,14 +501,14 @@ vt__vm_run_with_rk_tf (void)
 		struct intr_info s;
 		ulong v;
 	} vii;
-	ulong rflags;
-	ulong interruptibility_state;
-	ulong activity_state;
-	ulong proc_control;
-	ulong exit_reason;
-	ulong pending_debug_exception;
-	bool instruction_carried_out;
-	ulong fake_dr6;
+	ulong rflags = 0;
+	ulong interruptibility_state = 0;
+	ulong activity_state = 0;
+	ulong proc_control = 0;
+	ulong exit_reason = 0;
+	ulong pending_debug_exception = 0;
+	bool instruction_carried_out = false;
+	ulong fake_dr6 = 0;
 	
 	asm_vmread(VMCS_GUEST_INTERRUPTIBILITY_STATE, &interruptibility_state);
 	asm_vmread(VMCS_GUEST_ACTIVITY_STATE, &activity_state);

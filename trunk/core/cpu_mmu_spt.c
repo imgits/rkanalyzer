@@ -2389,7 +2389,7 @@ cpu_mmu_spt_pagefault (ulong err, ulong cr2)
 	u64 gfns_pass[5];
 	int i;
 #ifdef RK_ANALYZER
-	enum rk_result rk_res;
+	enum rk_result rk_res = RK_UNPROTECTED_AREA;
 /*
 	pmap_t m;
 	u64 pte;
@@ -2399,7 +2399,7 @@ cpu_mmu_spt_pagefault (ulong err, ulong cr2)
 	u64 oldpde;
 	u64 oldpdpte;
 */
-	ulong ip;
+	ulong ip = 0;
 	bool no_wr_fault_dispatch = false;
 	struct rk_tf_state *p_rk_tf = current->vmctl.get_struct_rk_tf();
 #endif
@@ -2520,8 +2520,8 @@ cpu_mmu_spt_pagefault (ulong err, ulong cr2)
 bool
 cpu_mmu_spt_extern_mapsearch (struct vcpu *p, phys_t start, phys_t end)
 {
-	bool retval;
-	int i;
+	bool retval = false;
+	int i = 0;
 	unsigned int exclude = p->current_spt_index;
 	
 	retval = extern_mapsearch (exclude, p, start, end);
@@ -2550,7 +2550,7 @@ cpu_mmu_spt_init_pcpu (void)
 int
 cpu_mmu_spt_init (void)
 {
-	int i;
+	int i = 0;
 	int retval = 0;
 	
 	for(i = 0;i < NUM_OF_SPT; i++){
@@ -2575,7 +2575,7 @@ void cpu_mmu_spt_switch (unsigned int spt_index)
 
 void cpu_mmu_spt_clearall ()
 {
-	int i;
+	int i = 0;
 	
 	for(i = 0;i < NUM_OF_SPT; i++){
 		update_cr3 (i, true);

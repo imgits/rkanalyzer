@@ -14,6 +14,8 @@
 
 #ifdef RK_ANALYZER
 
+//#define RK_ANALYZER_NO_USER_TRACE 1
+
 #define AREA_TAG_MAXLEN 20
 #define PROPERTY_MAX 10
 #define DR6_FLAG_BS 0x4000

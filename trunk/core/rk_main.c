@@ -121,7 +121,7 @@ rk_init_vcpu (void)
 
 static void rk_mark_page_readonly_single(unsigned int spt_index, virt_t addr)
 {
-	u64 pte;
+	u64 pte = 0;
 	pmap_t m;
 	
 	if((spt_index < 0) || (spt_index >= NUM_OF_SPT))
@@ -140,7 +140,7 @@ static void rk_mark_page_readonly_single(unsigned int spt_index, virt_t addr)
 
 static void rk_unmark_page_readonly_single(unsigned int spt_index, virt_t addr)
 {
-	u64 pte;
+	u64 pte = 0;
 	pmap_t m;
 	
 	if((spt_index < 0) || (spt_index >= NUM_OF_SPT))
@@ -160,18 +160,22 @@ static void rk_unmark_page_readonly_single(unsigned int spt_index, virt_t addr)
 static void rk_mark_page_readonly_batch(virt_t currentaddr){
 	//rk_unmark_page_readonly_single(KERNEL_LEGAL_SPT, currentaddr);
 	rk_mark_page_readonly_single(KERNEL_ILLEGAL_SPT, currentaddr);
+#ifndef RK_ANALYZER_NO_USER_TRACE
 	rk_mark_page_readonly_single(USER_SPT, currentaddr);
+#endif
 }
 
 static void rk_unmark_page_readonly_batch(virt_t currentaddr){
 	//rk_unmark_page_readonly_single(KERNEL_LEGAL_SPT, currentaddr);
 	rk_unmark_page_readonly_single(KERNEL_ILLEGAL_SPT, currentaddr);
+#ifndef RK_ANALYZER_NO_USER_TRACE
 	rk_unmark_page_readonly_single(USER_SPT, currentaddr);
+#endif
 }
 
 static struct mm_protected_page* rk_get_page_by_pfn(ulong pfn)
 {
-	struct mm_protected_page *page;
+	struct mm_protected_page *page = NULL;
 	
 	LIST1_FOREACH (list_pages, page) {
 		if(page->pfn == pfn)
@@ -185,7 +189,7 @@ static struct mm_protected_page* rk_get_page_by_pfn(ulong pfn)
 
 static struct mm_protected_page* get_page_by_gfns(u64 gfns, struct mm_protected_page* exclude_page)
 {
-	struct mm_protected_page *page;
+	struct mm_protected_page *page = NULL;
 
 	LIST1_FOREACH (list_pages, page) {
 		if((!(page->never_paged_in_yet)) && (page->gfns == gfns) && (page != exclude_page))
@@ -212,9 +216,9 @@ static struct mm_protected_page_samegfns_list* rk_get_page_samegfns_list_by_gfns
 static struct mm_protected_page_samegfns* rk_upgrade_to_original_page(ulong pfn)
 {
 	//Remove from derive list
-	struct mm_protected_page *page;
-	struct mm_protected_page_samegfns *page_samegfns;
-	struct mm_protected_page_samegfns *page_samegfns_n;
+	struct mm_protected_page *page = NULL;
+	struct mm_protected_page_samegfns *page_samegfns = NULL;
+	struct mm_protected_page_samegfns *page_samegfns_n = NULL;
 
 	LIST1_FOREACH (list_pages, page) {
 		if(!(page->never_paged_in_yet))
@@ -244,8 +248,8 @@ static void rk_downgrade_to_derived_page(struct mm_protected_page *page)
 
 static void rk_scan_for_pages_and_add_by_gfns(u64 gfns, struct mm_protected_page_samegfns_list *page_samegfns_list)
 {
-	u64 pte, pte_gfns;
-	virt_t currentaddr;
+	u64 pte = 0, pte_gfns = 0;
+	virt_t currentaddr = 0;
 	pmap_t m;
 	struct mm_protected_page_samegfns *page_samegfns;
 
@@ -283,16 +287,16 @@ static void rk_scan_for_pages_and_add_by_gfns(u64 gfns, struct mm_protected_page
 	pmap_close(&m);
 }
 
-static bool rk_is_area_overlapped_with_current_ones(virt_t startaddr, virt_t endaddr, bool display)
+static bool rk_is_area_overlapped_with_current_ones(virt_t startaddr, virt_t endaddr, ulong *properties, bool display)
 {
-	struct mm_protected_varange *varange;
+	struct mm_protected_varange *varange = NULL;
 	
 	LIST1_FOREACH (list_varanges, varange){
 		if((startaddr >= varange->startaddr) && (startaddr <= varange->endaddr)){
 			if(display){
 				printf("[RKAnalyzer]Error Add Area[0x%lX 0x%lX]: Overlapped Memory Area[0x%lX 0x%lX]!\n", 
 					startaddr, endaddr, varange->startaddr, varange->endaddr);
-				printf("Caller: 0x%lX\n", varange->properties[0]);
+				printf("Caller: 0x%lX, New Caller: 0x%lX\n", varange->properties[0], (properties == NULL ? 0 : properties[0]) );
 			}
 			return true;
 		}
@@ -301,7 +305,7 @@ static bool rk_is_area_overlapped_with_current_ones(virt_t startaddr, virt_t end
 			if(display){
 				printf("[RKAnalyzer]Error Add Area[0x%lX 0x%lX]: Overlapped Memory Area[0x%lX 0x%lX]!\n", 
 					startaddr, endaddr, varange->startaddr, varange->endaddr);
-				printf("Caller: 0x%lX\n", varange->properties[0]);
+				printf("Caller: 0x%lX, New Caller: 0x%lX\n", varange->properties[0], (properties == NULL ? 0 : properties[0]) );
 			}
 			return true;
 		}
@@ -317,15 +321,15 @@ mmprotect_callback callback_func, ulong *properties, int properties_count)
 	//(1) Add this area to list
 	//(2) Set those pages which contain this area to WP = 0
 
-	struct mm_protected_area *mmarea;
-	struct mm_protected_page *page;
-	struct mm_protected_varange *varange;
-	struct mm_protected_page_samegfns_list* page_samegfns_list;
-	struct mm_protected_page_samegfns *page_samegfns;
+	struct mm_protected_area *mmarea = NULL;
+	struct mm_protected_page *page = NULL;
+	struct mm_protected_varange *varange = NULL;
+	struct mm_protected_page_samegfns_list* page_samegfns_list = NULL;
+	struct mm_protected_page_samegfns *page_samegfns = NULL;
 
-	int areataglen;
-	u64 pte;
-	virt_t currentaddr, currentendaddr, nextaddr;
+	int areataglen = 0;
+	u64 pte = 0;
+	virt_t currentaddr = 0, currentendaddr = 0, nextaddr = 0;
 	pmap_t m;
 
 	if(startaddr > endaddr){
@@ -333,7 +337,7 @@ mmprotect_callback callback_func, ulong *properties, int properties_count)
 		return false;
 	}
 
-	if(rk_is_area_overlapped_with_current_ones(startaddr, endaddr, true)){
+	if(rk_is_area_overlapped_with_current_ones(startaddr, endaddr, properties, true)){
 		return false;
 	}
 
@@ -465,9 +469,9 @@ mmprotect_callback callback_func, ulong *properties, int properties_count)
 
 static void check_page_samegfns_list_for_delete(struct mm_protected_page_samegfns_list *list)
 {
-	struct mm_protected_page_samegfns *page_samegfns;
-	struct mm_protected_page_samegfns *page_samegfns_n;
-	u64 pte;
+	struct mm_protected_page_samegfns *page_samegfns = NULL;
+	struct mm_protected_page_samegfns *page_samegfns_n = NULL;
+	u64 pte = 0;
 	pmap_t m;
 
 	if(list->refcount <= 0){
@@ -493,7 +497,7 @@ static void check_page_samegfns_list_for_delete(struct mm_protected_page_samegfn
 
 static void check_page_for_delete(struct mm_protected_page *page, bool forcepresent)
 {
-	u64 pte;
+	u64 pte = 0;
 	pmap_t m;
 
 	if(LIST2_EMPTY(page->areas_in_page)){
@@ -530,10 +534,10 @@ static bool rk_unprotect_mmarea_core(virt_t startaddr, virt_t endaddr)
 	// Delete All Original Areas in va belongs to [startaddr endaddr]
 	// Also Remove derived areas
 
-	struct mm_protected_area *mmarea;
-	struct mm_protected_area *mmarea_n;
-	struct mm_protected_varange *varange;
-	struct mm_protected_varange *varange_n;
+	struct mm_protected_area *mmarea = NULL;
+	struct mm_protected_area *mmarea_n = NULL;
+	struct mm_protected_varange *varange = NULL;
+	struct mm_protected_varange *varange_n = NULL;
 	bool varange_found = false;
 
 	LIST1_FOREACH_DELETABLE (list_varanges, varange, varange_n){
@@ -582,8 +586,8 @@ bool rk_unprotect_mmarea(virt_t startaddr, virt_t endaddr)
 // else, ppage_samegfns = NULL
 static struct mm_protected_page* get_page_by_addr_in_same_page(virt_t addr, struct mm_protected_page_samegfns **ppage_samegfns)
 {
-	struct mm_protected_page *page;
-	struct mm_protected_page_samegfns *page_samegfns;
+	struct mm_protected_page *page = NULL;
+	struct mm_protected_page_samegfns *page_samegfns = NULL;
 
 	LIST1_FOREACH (list_pages, page){
 		if(page->pfn == (addr >> PAGESIZE_SHIFT)){
@@ -607,7 +611,7 @@ static struct mm_protected_page* get_page_by_addr_in_same_page(virt_t addr, stru
 
 static void update_RW_for_page(struct mm_protected_page *page)
 {
-	u64 pte;
+	u64 pte = 0;
 	pmap_t m;
 
 	pmap_open_vmm (&m, current->spt_array[current->current_spt_index].cr3tbl_phys, current->spt_array[current->current_spt_index].levels);
@@ -629,7 +633,7 @@ static void update_RW_for_page(struct mm_protected_page *page)
 
 static void update_RW_for_page_samegfns(struct mm_protected_page_samegfns *page_samegfns)
 {
-	u64 pte;
+	u64 pte = 0;
 	pmap_t m;
 
 	pmap_open_vmm (&m, current->spt_array[current->current_spt_index].cr3tbl_phys, current->spt_array[current->current_spt_index].levels);
@@ -651,9 +655,9 @@ static void update_RW_for_page_samegfns(struct mm_protected_page_samegfns *page_
 
 static void try_delay_release(virt_t addr)
 {
-	struct mm_protected_page_samegfns *page_samegfns;
-	struct mm_protected_page_samegfns *page_samegfns_n;
-	u64 pte;
+	struct mm_protected_page_samegfns *page_samegfns = NULL;
+	struct mm_protected_page_samegfns *page_samegfns_n = NULL;
+	u64 pte = 0;
 	pmap_t m;
 
 	LIST1_FOREACH_DELETABLE (list_delay_release_pages, page_samegfns, page_samegfns_n){
@@ -685,11 +689,11 @@ void rk_manipulate_mmarea_if_need(virt_t newvirtaddr, u64 gfns){
 
 	//TODO:Consider the condition that a Large Page(4M) contains a Small Page(4K)
 
-	struct mm_protected_page *page;
-	struct mm_protected_page *page_by_gfns;
-	struct mm_protected_page_samegfns *page_samegfns;
-	struct mm_protected_page_samegfns_list* page_samegfns_list;
-	u64 pte;
+	struct mm_protected_page *page = NULL;
+	struct mm_protected_page *page_by_gfns = NULL;
+	struct mm_protected_page_samegfns *page_samegfns = NULL;
+	struct mm_protected_page_samegfns_list* page_samegfns_list = NULL;
+	u64 pte = 0;
 	pmap_t m;
 
 	spinlock_lock(&mmarea_lock);
@@ -851,10 +855,10 @@ static enum rk_result rk_callfunc_if_addr_protected_core(virt_t virtaddr, bool d
 
 	//TODO:Add Support for Large Pages(4M)	
 
-	struct mm_protected_area *mmarea;
-	struct mm_protected_page *page;
-	struct mm_protected_page_samegfns *page_samegfns;
-	virt_t newstartaddr, newendaddr;
+	struct mm_protected_area *mmarea = NULL;
+	struct mm_protected_page *page = NULL;
+	struct mm_protected_page_samegfns *page_samegfns = NULL;
+	virt_t newstartaddr = 0, newendaddr = 0;
 	enum rk_result ret = RK_UNPROTECTED_AREA;
 	bool found = false;
 
@@ -918,7 +922,7 @@ static enum rk_result rk_callfunc_if_addr_protected_core(virt_t virtaddr, bool d
 
 enum rk_result rk_callfunc_if_addr_protected(virt_t virtaddr, bool display)
 {
-	enum rk_result res;
+	enum rk_result res = RK_UNPROTECTED_AREA;
 
 	spinlock_lock(&mmarea_lock);
 	res = rk_callfunc_if_addr_protected_core(virtaddr, display);
@@ -929,9 +933,9 @@ enum rk_result rk_callfunc_if_addr_protected(virt_t virtaddr, bool display)
 
 void rk_entry_before_tf(void)
 {
-	ulong cr0toshadow;	
-	ulong val;
-	ulong ip;
+	ulong cr0toshadow = 0;	
+	ulong val = 0;
+	ulong ip = 0;
 	int err = 0;
 	struct rk_tf_state *p_rk_tf = current->vmctl.get_struct_rk_tf();
 
@@ -954,9 +958,9 @@ void rk_entry_before_tf(void)
 
 void rk_ret_from_tf(bool was_instruction_carried_out)
 {
-	ulong cr0;
-	ulong ip;
-	ulong val;
+	ulong cr0 = 0;
+	ulong ip = 0;
+	ulong val = 0;
 	int err = 0;
 	struct rk_tf_state *p_rk_tf = current->vmctl.get_struct_rk_tf();
 
@@ -969,8 +973,10 @@ void rk_ret_from_tf(bool was_instruction_carried_out)
 				val = 0xBAD0BEEF;
 			}
 			rk_callfunc_if_addr_protected(p_rk_tf->addr, true);
-			printf("[RKAnalyzer][Report]LastEIP = 0x%lX, CurrentEIP = 0x%lX, Curernt.SPT = %d\n", p_rk_tf->last_eip, ip, current->current_spt_index);
-			printf("[RKAnalyzer][Report]Addr = 0x%lX, LastValue = 0x%lX, CurrentValue = 0x%lX\n", p_rk_tf->addr, p_rk_tf->originalval, val);
+			printf("[CPU%d][RKAnalyzer][Report]LastEIP = 0x%lX, CurrentEIP = 0x%lX, Curernt.SPT = %d\n", get_cpu_id(), 
+			p_rk_tf->last_eip, ip, current->current_spt_index);
+			printf("[CPU%d][RKAnalyzer][Report]Addr = 0x%lX, LastValue = 0x%lX, CurrentValue = 0x%lX\n", get_cpu_id(), 
+			p_rk_tf->addr, p_rk_tf->originalval, val);
 		}
 	}
 

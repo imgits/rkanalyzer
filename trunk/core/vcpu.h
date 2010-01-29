@@ -43,11 +43,18 @@
 #include "rk_main.h"
 
 #ifdef RK_ANALYZER
+#ifdef RK_ANALYZER_NO_USER_TRACE
+#define NORMAL_SPT 0			//Normal SPT. No W/R, No NX
+#define KERNEL_LEGAL_SPT 1		//W/R = 0, KERNEL LEGAL NX = 0, KERNEL ILLEGAL NX = 1, USER NX = 0
+#define KERNEL_ILLEGAL_SPT 2 	//W/R = 1, KERNEL LEGAL NX = 1, KERNEL ILLEGAL NX = 0, USER NX = 0
+#define NUM_OF_SPT 3
+#else
 #define NORMAL_SPT 0			//Normal SPT. No W/R, No NX
 #define KERNEL_LEGAL_SPT 1		//W/R = 0, KERNEL LEGAL NX = 0, KERNEL ILLEGAL NX = 1, USER NX = 1
 #define KERNEL_ILLEGAL_SPT 2 	//W/R = 1, KERNEL LEGAL NX = 1, KERNEL ILLEGAL NX = 0, USER NX = 1
 #define USER_SPT 3				//W/R = 1, KERNEL NX = 1, USER NX = 0
 #define NUM_OF_SPT 4
+#endif
 #else
 #define NORMAL_SPT 0
 #define NUM_OF_SPT 1
