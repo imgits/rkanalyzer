@@ -9,6 +9,10 @@
 #define SWAP_CONTEXT_ENTRY_OFFSET_IN_KERNEL 0x3A9CC
 #define PSLOADEDMODULELIST_OFFSET_IN_KERNEL 0xaf988
 
+#define WIN_KERNEL_BASE			0x80800000
+#define WIN_KERNEL_BSP_STARTUP_EIP	(WIN_KERNEL_BASE + 0x2211fc)
+#define WIN_KERNEL_AP_STARTUP_EIP	(WIN_KERNEL_BASE + 0x2211fc)
+
 typedef struct _IMAGE_DOS_HEADER {      // DOS .EXE header
     u16   e_magic;                     // Magic number
     u16   e_cblp;                      // Bytes on last page of file

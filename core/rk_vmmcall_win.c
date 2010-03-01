@@ -89,10 +89,14 @@ static spinlock_t call_info_access_lock;
 static volatile ulong call_info_list_watchdog;
 static volatile ulong call_info_list_current_count;
 static spinlock_t call_info_watchdog_lock;
+static spinlock_t global_init_lock;
 
 static LIST1_DEFINE_HEAD (struct guest_win_pe, list_pes);
 static LIST1_DEFINE_HEAD (struct guest_win_pe_base_filter, list_pe_base_filter);
 static LIST1_DEFINE_HEAD (struct guest_win_exallocatepoolwithtag_call_info_stack, list_call_info);	//call info stack for ExAllocatePoolWithTag in Windows
+
+static void rk_win_init(void);
+static bool rk_win_check_for_kernel(void);
 
 static bool
 guest64 (void)
@@ -411,70 +415,122 @@ static void rk_win_add_call_info_by_kthread_addr(ulong kthread_addr, struct gues
 	spinlock_unlock(&call_info_access_lock);
 }
 
+static void rk_win_set_dr_to_virt(int debug_num, virt_t addr)
+{
+	virt_t res = 0;
+	ulong dr7 = 0;
+	ulong dr7_or_mask = 0;
+	ulong dr7_and_mask = 0;
+	struct rk_tf_state *p_rk_tf = current->vmctl.get_struct_rk_tf();
+	
+	switch(debug_num){
+	case 0:
+		if((p_rk_tf->dr_shadow_flag & DR_SHADOW_DR0) == 0){
+			asm volatile ("mov %%db0, %0" : "=r"(res));
+			p_rk_tf->dr_shadow_flag |= DR_SHADOW_DR0;
+			p_rk_tf->dr0_shadow = res;
+		}
+		asm volatile ("mov %0, %%db0" : : "r"(addr));
+		dr7_or_mask = 0x2;
+		dr7_and_mask = 0xFFF0FFFF;
+		break;
+	case 1:
+		if((p_rk_tf->dr_shadow_flag & DR_SHADOW_DR1) == 0){
+			asm volatile ("mov %%db1, %0" : "=r"(res));
+			p_rk_tf->dr_shadow_flag |= DR_SHADOW_DR1;
+			p_rk_tf->dr1_shadow = res;
+		}
+		asm volatile ("mov %0, %%db1" : : "r"(addr));
+		dr7_or_mask = 0x8;
+		dr7_and_mask = 0xFF0FFFFF;
+		break;
+	case 2:
+		if((p_rk_tf->dr_shadow_flag & DR_SHADOW_DR2) == 0){
+			asm volatile ("mov %%db2, %0" : "=r"(res));
+			p_rk_tf->dr_shadow_flag |= DR_SHADOW_DR2;
+			p_rk_tf->dr2_shadow = res;
+		}
+		asm volatile ("mov %0, %%db2" : : "r"(addr));
+		dr7_or_mask = 0x20;
+		dr7_and_mask = 0xF0FFFFFF;
+		break;
+	case 3:
+		if((p_rk_tf->dr_shadow_flag & DR_SHADOW_DR3) == 0){
+			asm volatile ("mov %%db3, %0" : "=r"(res));
+			p_rk_tf->dr_shadow_flag |= DR_SHADOW_DR3;
+			p_rk_tf->dr3_shadow = res;
+		}
+		asm volatile ("mov %0, %%db3" : : "r"(addr));
+		dr7_or_mask = 0x80;
+		dr7_and_mask = 0x0FFFFFFF;
+		break;
+	default:
+		return;
+	}
+
+	asm_vmread(VMCS_GUEST_DR7, &dr7);
+	if((p_rk_tf->dr_shadow_flag & DR_SHADOW_DR7) == 0){
+		p_rk_tf->dr_shadow_flag |= DR_SHADOW_DR7;
+		p_rk_tf->dr7_shadow = dr7;
+	}
+	dr7 |= dr7_or_mask;		//DR7.GX = 1
+	dr7 &= dr7_and_mask;	//DR7.R/WX = 00, DR7.LENX = 00;
+	asm_vmwrite(VMCS_GUEST_DR7, dr7);
+	//printf("Debug Register Set. DR1 = 0x%lx, DR7 =  0x%lx\n", addr, dr7);
+}
+
+static void rk_win_remove_dr(int debug_num)
+{
+	ulong dr7 = 0;
+	ulong dr7_nor_mask = 0;
+	struct rk_tf_state *p_rk_tf = current->vmctl.get_struct_rk_tf();
+	
+	switch(debug_num){
+	case 0:
+		p_rk_tf->dr_shadow_flag &= (~(DR_SHADOW_DR0));
+		asm volatile ("mov %0, %%db0" : : "r"(p_rk_tf->dr0_shadow));
+		dr7_nor_mask = 0x2;
+		break;
+	case 1:
+		p_rk_tf->dr_shadow_flag &= (~(DR_SHADOW_DR1));
+		asm volatile ("mov %0, %%db1" : : "r"(p_rk_tf->dr1_shadow));
+		dr7_nor_mask = 0x8;
+		break;
+	case 2:
+		p_rk_tf->dr_shadow_flag &= (~(DR_SHADOW_DR2));
+		asm volatile ("mov %0, %%db2" : : "r"(p_rk_tf->dr2_shadow));
+		dr7_nor_mask = 0x20;
+		break;
+	case 3:
+		p_rk_tf->dr_shadow_flag &= (~(DR_SHADOW_DR3));
+		asm volatile ("mov %0, %%db3" : : "r"(p_rk_tf->dr3_shadow));
+		dr7_nor_mask = 0x80;
+		break;
+	default:
+		return;
+	}
+
+	asm_vmread(VMCS_GUEST_DR7, &dr7);
+	dr7 &= (~(dr7_nor_mask));	//DR7.GX = 0
+	asm_vmwrite(VMCS_GUEST_DR7, dr7);
+}
+
 //Use DR0 and DR2, DR3 here.
 static void rk_win_setdebugregister()
 {
 	virt_t pCallEntry = 0;
 	virt_t pCallEntry_2 = 0;
-	virt_t res = 0;
 	ulong dr7 = 0;
-	struct rk_tf_state *p_rk_tf = current->vmctl.get_struct_rk_tf();
 
 	if (rk_win_getentryaddrbyname("ExAllocatePoolWithTag", &pCallEntry) && 
 	rk_win_getentryaddrbyname("ExFreePoolWithTag", &pCallEntry_2) && (kernelbase != 0)) {
-		asm volatile ("mov %%db0, %0" : "=r"(res));
-		p_rk_tf->dr_shadow_flag |= DR_SHADOW_DR0;
-		p_rk_tf->dr0_shadow = res;
-		asm volatile ("mov %0, %%db0" : : "r"(pCallEntry));
-		asm volatile ("mov %%db2, %0" : "=r"(res));
-		p_rk_tf->dr_shadow_flag |= DR_SHADOW_DR2;
-		p_rk_tf->dr2_shadow = res;
-		asm volatile ("mov %0, %%db2" : : "r"(pCallEntry_2));
-		asm volatile ("mov %%db3, %0" : "=r"(res));
-		p_rk_tf->dr_shadow_flag |= DR_SHADOW_DR3;
-		p_rk_tf->dr2_shadow = res;
-		asm volatile ("mov %0, %%db3" : : "r"(kernelbase + SWAP_CONTEXT_ENTRY_OFFSET_IN_KERNEL));
+		rk_win_set_dr_to_virt(0, pCallEntry);
+		rk_win_set_dr_to_virt(2, pCallEntry_2);
+		rk_win_set_dr_to_virt(3, (kernelbase + SWAP_CONTEXT_ENTRY_OFFSET_IN_KERNEL));
 		asm_vmread(VMCS_GUEST_DR7, &dr7);
-		p_rk_tf->dr_shadow_flag |= DR_SHADOW_DR7;
-		p_rk_tf->dr7_shadow = dr7;
-		dr7 |= 0x2;	//DR7.G0 = 1
-		dr7 |= 0x20;	//DR7.G2 = 1
-		dr7 |= 0x80;	//DR7.G3 = 1
-		dr7 &= 0x00F0FFFF;	//DR7.R/W0 = 00, DR7.LEN0 = 00; DR7.R/W2 = 00, DR7.LEN2 = 00; DR7.R/W3 = 00, DR7.LEN3 = 00
-		asm_vmwrite(VMCS_GUEST_DR7, dr7);
 		printf("Debug Register Set. DR0 = 0x%lx, DR2 = 0x%lx, DR3 = 0x%lx, DR7 =  0x%lx\n", 
 			pCallEntry, pCallEntry_2, kernelbase + SWAP_CONTEXT_ENTRY_OFFSET_IN_KERNEL, dr7);
 	}
-}
-
-static void rk_win_set_dr1_to_virt(virt_t addr)
-{
-	virt_t res = 0;
-	ulong dr7 = 0;
-	struct rk_tf_state *p_rk_tf = current->vmctl.get_struct_rk_tf();
-
-	asm volatile ("mov %%db1, %0" : "=r"(res));
-	p_rk_tf->dr_shadow_flag |= DR_SHADOW_DR1;
-	p_rk_tf->dr1_shadow = res;
-	asm volatile ("mov %0, %%db1" : : "r"(addr));
-	asm_vmread(VMCS_GUEST_DR7, &dr7);
-	dr7 |= 0x8;	//DR7.G1 = 1
-	dr7 &= 0xFF0FFFFF;	//DR7.R/W1 = 00, DR7.LEN1 = 00;
-	asm_vmwrite(VMCS_GUEST_DR7, dr7);
-	//printf("Debug Register Set. DR1 = 0x%lx, DR7 =  0x%lx\n", addr, dr7);
-}
-
-static void rk_win_remove_dr1()
-{
-	ulong dr7 = 0;
-	struct rk_tf_state *p_rk_tf = current->vmctl.get_struct_rk_tf();
-
-	p_rk_tf->dr_shadow_flag &= (~(DR_SHADOW_DR1));
-	asm volatile ("mov %0, %%db1" : : "r"(p_rk_tf->dr1_shadow));
-	asm_vmread(VMCS_GUEST_DR7, &dr7);
-	dr7 &= (~(0x8));	//DR7.G1 = 0
-	asm_vmwrite(VMCS_GUEST_DR7, dr7);
-	//printf("Debug Register 1 Removed.\n");
 }
 
 static bool mmprotect_callback_win_pereadonly(struct mm_protected_area *mmarea, virt_t addr, bool display)
@@ -520,6 +576,39 @@ static bool mmprotect_callback_win_kernelheap(struct mm_protected_area *mmarea, 
 static bool mmcode_callback_general (struct mm_code_varange* mmvarange, virt_t addr, bool display)
 {
 	return true;
+}
+
+static void rk_win_dr_dispatch_detectboot(int debug_num)
+{
+	bool kernelfound = false;
+	struct rk_tf_state *p_rk_tf = current->vmctl.get_struct_rk_tf();
+	
+	switch(debug_num){
+	case 0:
+	case 1:
+		//So we have the instruction at the address we expected executed
+		//But we don't know if it is the kernel!
+		//We scan for the PE of the kernel to make sure.
+		
+		printf("Hit on CPU%d", get_cpu_id());
+		kernelfound = rk_win_check_for_kernel();
+		if(kernelfound){
+			//OK, the kernel has already been booted.
+			//We can initialized everything
+			rk_win_remove_dr(0);
+			rk_win_remove_dr(1);
+			
+			//Get a lock here to do global initialize
+			spinlock_lock(&global_init_lock);
+			rk_win_init();
+			spinlock_unlock(&global_init_lock);
+		}
+		break;
+	default:
+		break;
+	}
+	
+	p_rk_tf->should_set_rf_befor_entry = true;
 }
 
 static void rk_win_dr_dispatch(int debug_num)
@@ -597,7 +686,7 @@ static void rk_win_dr_dispatch(int debug_num)
 				
 				//Set DR1 to the retaddr. clear interrupts to disable thread switch
 				//Because in exception handlers, they won't call ExAllocate functions. so it is garuanteend to obtain the return value
-				rk_win_set_dr1_to_virt(call_info.retaddr);
+				rk_win_set_dr_to_virt(1, call_info.retaddr);
 			}
 		}
 		break;
@@ -633,10 +722,10 @@ static void rk_win_dr_dispatch(int debug_num)
 		//If there are still calls in the stack, set dr1 to the top of the stack.
 		exalloc_call_info = rk_win_get_call_info_by_kthread_addr(rk_win_get_current_kthread_addr(), false);
 		if(exalloc_call_info == NULL){
-			rk_win_remove_dr1();
+			rk_win_remove_dr(1);
 		}
 		else{
-			rk_win_set_dr1_to_virt(exalloc_call_info->retaddr);
+			rk_win_set_dr_to_virt(1, exalloc_call_info->retaddr);
 		}
 		break;
 	case 2:
@@ -665,10 +754,10 @@ static void rk_win_dr_dispatch(int debug_num)
 		exalloc_call_info = rk_win_get_call_info_by_kthread_addr(esi, false);
 		if(exalloc_call_info == NULL){
 			//Switched to a thread not monitored
-			rk_win_remove_dr1();
+			rk_win_remove_dr(1);
 		}
 		else{
-			rk_win_set_dr1_to_virt(exalloc_call_info->retaddr);
+			rk_win_set_dr_to_virt(1, exalloc_call_info->retaddr);
 			//printf("[CPU %d]Switch To:Caller = 0x%lX\n", get_cpu_id(), exalloc_call_info->retaddr);
 		}
 		break;
@@ -749,6 +838,42 @@ nextstep:
 		pebase ++;
 		pebase = pebase << PAGESIZE_SHIFT;
 	}
+}
+
+static bool rk_win_check_for_kernel()
+{
+	ulong pebase = 0;
+	ulong buf = 0;
+	ulong addr = 0;
+	
+	pebase = 0x80000000;
+	while(pebase < 0xa0000000){
+		if(read_linearaddr_l(pebase, &buf) == VMMERR_SUCCESS){
+			if(buf == 0x00905A4D){
+				//Found 'MZ'
+				//Test if the ImageSize is bigger than 0x150000
+				addr = pebase + rk_struct_win_offset(IMAGE_DOS_HEADER, e_lfanew);
+				if(read_linearaddr_l(addr, &buf) == VMMERR_SUCCESS){
+					addr = pebase + buf + rk_struct_win_offset(IMAGE_NT_HEADERS, 
+						OptionalHeader.SizeOfImage);
+					if(read_linearaddr_l(addr, &buf) == VMMERR_SUCCESS){
+						if(buf >= 0x150000){
+							break;
+						}
+					}
+				}
+			}
+		}
+		pebase = pebase >> PAGESIZE_SHIFT;
+		pebase ++;
+		pebase = pebase << PAGESIZE_SHIFT;
+	}
+
+	if(pebase >= 0xa0000000){
+		return false;
+	}
+	
+	return true;
 }
 
 //scankernel = true -> scan kernel, ignore, hint_addr
@@ -1019,7 +1144,7 @@ static bool rk_win_readfromguest(struct guest_win_pe *p_pe, bool scankernel, vir
 	return true;
 
 init_failed:
-	printf("[RKAnalyzer]Fail To Read PE!, step = %d, buf= %lX, addr= %lX, err = %d\n", step, buf, addr, err);
+	printf("[RKAnalyzer]Fail To Read PE!, Hint = %lX, step = %d, buf= %lX, addr= %lX, err = %d\n", hint_addr, step, buf, addr, err);
 	return false;
 }
 
@@ -1068,22 +1193,24 @@ static enum rk_code_type rk_win_unknown_code_check_dispatch(virt_t addr)
 			}
 		}
 		
-		new_pe->legal = in_filter;
+		//TODO:we set it to ture for now to support os boot
+		new_pe->legal = true;
 		LIST1_ADD(list_pes, new_pe);
 		//rk_win_protectpereadonlysections(new_pe);
 		LIST1_FOREACH (new_pe->list_sections, section) {
 			if((section->characteristics & IMAGE_SCN_MEM_EXECUTE) != 0)
 				rk_add_code_mmvarange_nolock(new_pe->legal, section->va, section->va + section->size - 1, mmcode_callback_general);
 		}
+		
+		return (new_pe->legal ? RK_CODE_LEGAL : RK_CODE_ILLEGAL);
 	}
 	else{
 		free(new_pe);
 		
 		//Add as a scratch
-		rk_add_code_mmvarange_nolock(false, addr, addr, mmcode_callback_general);
+		rk_add_code_mmvarange_nolock(true, addr, addr, mmcode_callback_general);
+		return RK_CODE_LEGAL;
 	}
-	
-	return RK_CODE_ILLEGAL;
 }
 
 static void rk_win_switch_print_dispatch(virt_t from_ip, virt_t to_ip)
@@ -1205,7 +1332,7 @@ void rk_win_os_dep_setter(void)
 	os_dep.switch_print_dispatcher = rk_win_switch_print_dispatch;
 }
 
-bool rk_win_init_global(virt_t base)
+bool rk_win_init_global()
 {
 	struct guest_win_pe_section *section = NULL;
 	
@@ -1238,7 +1365,7 @@ bool rk_win_init_per_vcpu(void)
 		return true;
 	}
 
-	rk_win_setdebugregister();
+	//rk_win_setdebugregister();
 	printf("[RKAnalyzer]CPU %d Initialized.\n", get_cpu_id());
 	
 	return true;
@@ -1247,13 +1374,7 @@ bool rk_win_init_per_vcpu(void)
 static void rk_win_init(void)
 {
 	//Get Windows Kernel Address From guest
-	ulong  rbx = 0;
-	virt_t base = 0;
-	
-	current->vmctl.read_general_reg (GENERAL_REG_RBX, &rbx);
-	base = (virt_t)rbx;
-
-	if(!(rk_win_init_global(base))){
+	if(!(rk_win_init_global())){
 		return;
 	}
 	
@@ -1276,9 +1397,24 @@ vmmcall_rk_win_init (void)
 	LIST1_HEAD_INIT (list_pe_base_filter);
 	spinlock_init(&call_info_access_lock);
 	spinlock_init(&call_info_watchdog_lock);
+	spinlock_init(&global_init_lock);
+	
+	//Our Temp DR dispatcher for OS booting detect
+	os_dep.dr_dispatcher_detectboot = rk_win_dr_dispatch_detectboot;
+	
 	printf("RKAnalyzer Windows Module Initialized...\n");
 }
 
+static void
+rk_win_set_detect_osboot (void)
+{	
+	//And we use DR1
+	rk_win_set_dr_to_virt(0, WIN_KERNEL_BSP_STARTUP_EIP);
+	rk_win_set_dr_to_virt(1, WIN_KERNEL_AP_STARTUP_EIP);
+	printf("OS Boot Detecting Setup ON CPU%d...\n", get_cpu_id());
+}
+
 INITFUNC ("vmmcal0", vmmcall_rk_win_init);
+INITFUNC ("vcpu0", rk_win_set_detect_osboot);
 
 #endif

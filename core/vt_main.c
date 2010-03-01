@@ -218,9 +218,9 @@ do_exception (void)
 		case INTR_INFO_TYPE_HARD_EXCEPTION:
 			STATUS_UPDATE (asm_lock_incl (&stat_hwexcnt));
 #ifdef RK_ANALYZER
-			if(current->u.vt.vr.rk_tf.initialized){
-				if (vii.s.vector == EXCEPTION_DB){
-					asm_vmread (VMCS_EXIT_QUALIFICATION, &fake_dr6);
+			if (vii.s.vector == EXCEPTION_DB){
+				asm_vmread (VMCS_EXIT_QUALIFICATION, &fake_dr6);
+				if(current->u.vt.vr.rk_tf.initialized){
 					if(os_dep.dr_dispatcher != NULL){
 						if(fake_dr6 & DR6_FLAG_B0)
 							os_dep.dr_dispatcher(0);
@@ -231,13 +231,25 @@ do_exception (void)
 						if(fake_dr6 & DR6_FLAG_B3)
 							os_dep.dr_dispatcher(3);
 					}
-					break;
 				}
-			
-				if (vii.s.vector == EXCEPTION_DB && current->u.vt.vr.rk_tf.dont_pass_db){
-					current->u.vt.vr.rk_tf.dont_pass_db = false;
-					break;
+				else{
+					if(os_dep.dr_dispatcher_detectboot != NULL){
+						if(fake_dr6 & DR6_FLAG_B0)
+							os_dep.dr_dispatcher_detectboot(0);
+						if(fake_dr6 & DR6_FLAG_B1)
+							os_dep.dr_dispatcher_detectboot(1);
+						if(fake_dr6 & DR6_FLAG_B2)
+							os_dep.dr_dispatcher_detectboot(2);
+						if(fake_dr6 & DR6_FLAG_B3)
+							os_dep.dr_dispatcher_detectboot(3);
+					}
 				}
+				break;
+			}
+		
+			if (vii.s.vector == EXCEPTION_DB && current->u.vt.vr.rk_tf.dont_pass_db){
+				current->u.vt.vr.rk_tf.dont_pass_db = false;
+				break;
 			}
 							
 			if (vii.s.vector == EXCEPTION_DB &&
