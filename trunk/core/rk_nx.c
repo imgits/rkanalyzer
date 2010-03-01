@@ -32,10 +32,24 @@ rk_nx_init_global (void)
 
 static bool is_kernel_page(virt_t addr)
 {
-	if(addr >= os_dep.va_kernel_start)
-		return true;
-		
-	return false;
+	u64 pte = 0;
+	pmap_t m;
+	
+	pmap_open_vmm (&m, current->spt_array[current->current_spt_index].cr3tbl_phys, current->spt_array[current->current_spt_index].levels);
+	pmap_seek (&m, addr, 1);
+	pte = pmap_read(&m);
+	
+	if(addr == 0xA2A3E2){
+		printf("pte = %lX\n", pte);
+	}
+	
+	if(pte & PTE_US_BIT){
+		pmap_close(&m);
+		return false;
+	}
+	
+	pmap_close(&m);
+	return true;
 }
 
 static u16 rk_nx_rd_guest_cpl()
@@ -312,9 +326,7 @@ static struct mm_code_varange* rk_check_code_type_same_page_core(virt_t virtaddr
 void rk_manipulate_code_mmvarange_if_need(virt_t newvirtaddr, u64 gfns){
 
 	struct mm_code_varange* mmvarange = NULL;
-	u16 cpl_current = 0;
 	struct rk_tf_state *rk_tf = current->vmctl.get_struct_rk_tf();
-	cpl_current = rk_nx_rd_guest_cpl();
 	
 	//Route:
 	//1.newvirtaddr is kernel
@@ -322,6 +334,10 @@ void rk_manipulate_code_mmvarange_if_need(virt_t newvirtaddr, u64 gfns){
 	//1(b).newvirtaddr is illegal
 	//1(c).newvirtaddr is unknown
 	//2.newvirtaddr is user
+	
+	//TODO: There is a bug here. we should not decide whether the page is a kernel page
+	// by its address. Instead we should check the U/S bit of the page table.
+	// However i'm going back for holiday. This should be fixed after I get back
 	
 	if(is_kernel_page(newvirtaddr)){
 
@@ -386,6 +402,7 @@ enum rk_nx_result rk_check_code_mmvarange(virt_t virtaddr)
 	// 3c(1).If LEGAL->LEGAL or ILLEGAL->ILLEGAL, set new pages PTE NX = 0;
 	// 3c(2).ELSE, goto 3a or 3b
 	// 3d.If code_legal_known = false, then set new pages PTE NX = 0;
+	// 3f.Execute code in user pages in Kernel CPL. just switch to USER_SPT.
 	//
 	// Special: If code_legal_known = false in rk_tf_state, then we should set it here if we in kernel
 	
@@ -410,6 +427,16 @@ enum rk_nx_result rk_check_code_mmvarange(virt_t virtaddr)
 		else if(cpl_current == CPL_KERNEL)
 		{
 			//Route 3
+			
+			//Route 3f
+			if(!is_kernel_page(virtaddr)){
+				rk_tf->cpl_last = CPL_KERNEL_EXEC_USER_PAGE;
+				rk_tf->disable_protect = false;
+#ifndef RK_ANALYZER_NO_USER_TRACE
+				cpu_mmu_spt_switch(USER_SPT);
+#endif
+				return RK_NX_K2U;
+			}
 
 			//Route 3c
 			spinlock_lock(&mm_code_area_lock);
@@ -454,14 +481,14 @@ enum rk_nx_result rk_check_code_mmvarange(virt_t virtaddr)
 				return RK_NX_IL2L;
 			}
 			
-			//panic("Strange Status in rk_nx 0, %d, %d, %lX, CPU[%d]\n", legal, rk_tf->current_code_legal, virtaddr, get_cpu_id());
+			//printf("Strange Status in rk_nx 0, %d, %d, %lX, CPU[%d]\n", legal, rk_tf->current_code_legal, virtaddr, get_cpu_id());
 			return RK_NX_SYSTEM;
 		}
 		
 		panic("Strange Status in rk_nx 1\n");
 		return RK_NX_SYSTEM;
 	}
-	else if (rk_tf->cpl_last == CPL_USER)
+	else if ((rk_tf->cpl_last == CPL_USER) || (rk_tf->cpl_last == CPL_KERNEL_EXEC_USER_PAGE))
 	{
 		if(cpl_current == CPL_KERNEL)
 		{

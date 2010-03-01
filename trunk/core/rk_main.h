@@ -33,6 +33,7 @@
 
 #define CPL_KERNEL	0
 #define CPL_USER	3
+#define CPL_KERNEL_EXEC_USER_PAGE	0xF
 
 #ifdef __x86_64__
 #define MAX_VA		0xFFFFFFFFFFFFFFFFULL
@@ -143,6 +144,7 @@ struct rk_tf_state{
 struct os_dependent{
 	ulong va_kernel_start;				//Kernel Page Start Virtual Address
 	debugreg_dispatch dr_dispatcher;		//Dispatch Routine for Debug Register Monitor
+	debugreg_dispatch dr_dispatcher_detectboot;		//Dispatch Routine for Debug Register Monitor
 	
 	//Dispatch Routine for Unknown code check.
 	//NB: DO NOT CALL ANY FUNCTION OF rk_nx.h IN THIS FUNCTION!!!!!!!!!!
