@@ -522,6 +522,12 @@ vt__vm_run_with_rk_tf (void)
 	bool instruction_carried_out = false;
 	ulong fake_dr6 = 0;
 	
+	//Sanity Check
+	asm_vmread (VMCS_VMENTRY_INTR_INFO_FIELD, &vii.v);
+	if(vii.s.valid == INTR_INFO_VALID_VALID){
+		panic("Fatal Error: Exception With RK_TF.");
+	}
+	
 	asm_vmread(VMCS_GUEST_INTERRUPTIBILITY_STATE, &interruptibility_state);
 	asm_vmread(VMCS_GUEST_ACTIVITY_STATE, &activity_state);
 	

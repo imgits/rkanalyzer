@@ -68,4 +68,6 @@ typedef union {
 	u32 dwords[2];
 } core_mem_t;
 
+#define offsetof(s,m)   (size_t)&(((s *)0)->m)
+
 #endif

@@ -522,14 +522,16 @@ static void rk_win_setdebugregister()
 	virt_t pCallEntry_2 = 0;
 	ulong dr7 = 0;
 
+	printf("[CPU%d]%d, %d, %lX\n", get_cpu_id(), rk_win_getentryaddrbyname("ExAllocatePoolWithTag", &pCallEntry), rk_win_getentryaddrbyname("ExFreePoolWithTag", &pCallEntry_2), kernelbase);
+
 	if (rk_win_getentryaddrbyname("ExAllocatePoolWithTag", &pCallEntry) && 
 	rk_win_getentryaddrbyname("ExFreePoolWithTag", &pCallEntry_2) && (kernelbase != 0)) {
 		rk_win_set_dr_to_virt(0, pCallEntry);
 		rk_win_set_dr_to_virt(2, pCallEntry_2);
 		rk_win_set_dr_to_virt(3, (kernelbase + SWAP_CONTEXT_ENTRY_OFFSET_IN_KERNEL));
 		asm_vmread(VMCS_GUEST_DR7, &dr7);
-		printf("Debug Register Set. DR0 = 0x%lx, DR2 = 0x%lx, DR3 = 0x%lx, DR7 =  0x%lx\n", 
-			pCallEntry, pCallEntry_2, kernelbase + SWAP_CONTEXT_ENTRY_OFFSET_IN_KERNEL, dr7);
+		printf("[CPU%d]Debug Register Set. DR0 = 0x%lx, DR2 = 0x%lx, DR3 = 0x%lx, DR7 =  0x%lx\n", 
+			get_cpu_id(), pCallEntry, pCallEntry_2, kernelbase + SWAP_CONTEXT_ENTRY_OFFSET_IN_KERNEL, dr7);
 	}
 }
 
@@ -1193,10 +1195,17 @@ static enum rk_code_type rk_win_unknown_code_check_dispatch(virt_t addr)
 			}
 		}
 		
-		//TODO:we set it to ture for now to support os boot
-		new_pe->legal = true;
+		new_pe->legal = is_current_module_legal();
 		LIST1_ADD(list_pes, new_pe);
 		//rk_win_protectpereadonlysections(new_pe);
+		
+		if((!in_filter) && new_pe->legal) {
+			//Add Legal Module to Filter
+			p_pe_base_filter = alloc(sizeof(struct guest_win_pe_base_filter));
+			p_pe_base_filter->imagebase = new_pe->imagebase;
+			LIST1_ADD(list_pe_base_filter, p_pe_base_filter);
+		}
+		
 		LIST1_FOREACH (new_pe->list_sections, section) {
 			if((section->characteristics & IMAGE_SCN_MEM_EXECUTE) != 0)
 				rk_add_code_mmvarange_nolock(new_pe->legal, section->va, section->va + section->size - 1, mmcode_callback_general);
@@ -1263,16 +1272,16 @@ static void rk_win_switch_print_dispatch(virt_t from_ip, virt_t to_ip)
 			p_symbol = rk_win_getsymbolbyentry(to_ip);
 			
 			if(p_symbol == NULL){
-				printf("[CPU%d][RKAnalyzer][Rootkit->Kernel][%s+0x%lX->%s+0x%lX][%lX->%lX]\n", get_cpu_id(), 
+				dbgprint("[CPU%d][RKAnalyzer][Rootkit->Kernel][%s+0x%lX->%s+0x%lX][%lX->%lX]\n", get_cpu_id(), 
 				p_from_pe->name, from_ip - p_from_pe->imagebase, p_to_pe->name, to_ip - p_to_pe->imagebase, from_ip, to_ip);
 			}
 			else{
 				if(p_symbol->va == to_ip){
-					printf("[CPU%d][RKAnalyzer][Rootkit->Kernel][%s+0x%lX->%s+%s][%lX->%lX]\n", get_cpu_id(), 
+					dbgprint("[CPU%d][RKAnalyzer][Rootkit->Kernel][%s+0x%lX->%s+%s][%lX->%lX]\n", get_cpu_id(), 
 					p_from_pe->name, from_ip - p_from_pe->imagebase, p_to_pe->name, p_symbol->name, from_ip, to_ip);
 				}
 				else{
-					printf("[CPU%d][RKAnalyzer][Rootkit->Kernel][%s+0x%lX->%s+0x%lX(%s+0x%lX)][%lX->%lX]\n", get_cpu_id(), 
+					dbgprint("[CPU%d][RKAnalyzer][Rootkit->Kernel][%s+0x%lX->%s+0x%lX(%s+0x%lX)][%lX->%lX]\n", get_cpu_id(), 
 					p_from_pe->name, from_ip - p_from_pe->imagebase, p_to_pe->name, to_ip - p_to_pe->imagebase, p_symbol->name,
 					to_ip - p_symbol->va, from_ip, to_ip);
 				}
@@ -1305,16 +1314,16 @@ static void rk_win_switch_print_dispatch(virt_t from_ip, virt_t to_ip)
 								
 				//kernel->rootkit
 				if(p_symbol == NULL){
-					printf("[CPU%d][RKAnalyzer][Kernel->Rootkit][%s+0x%lX->%s+0x%lX][%lX->%lX]\n", get_cpu_id(), 
+					dbgprint("[CPU%d][RKAnalyzer][Kernel->Rootkit][%s+0x%lX->%s+0x%lX][%lX->%lX]\n", get_cpu_id(), 
 					p_from_pe->name, from_ip - p_from_pe->imagebase, p_to_pe->name, to_ip - p_to_pe->imagebase, from_ip, to_ip);
 				}
 				else{
 					if(p_symbol->va == from_ip){
-						printf("[CPU%d][RKAnalyzer][Kernel->Rootkit][%s+%s->%s+0x%lX][%lX->%lX]\n", get_cpu_id(), 
+						dbgprint("[CPU%d][RKAnalyzer][Kernel->Rootkit][%s+%s->%s+0x%lX][%lX->%lX]\n", get_cpu_id(), 
 						p_from_pe->name, p_symbol->name, p_to_pe->name, to_ip - p_to_pe->imagebase, from_ip, to_ip);
 					}
 					else{
-						printf("[CPU%d][RKAnalyzer][Kernel->Rootkit][%s+0x%lX(%s+0x%lX)->%s+0x%lX][%lX->%lX]\n", get_cpu_id(), 
+						dbgprint("[CPU%d][RKAnalyzer][Kernel->Rootkit][%s+0x%lX(%s+0x%lX)->%s+0x%lX][%lX->%lX]\n", get_cpu_id(), 
 						p_from_pe->name, from_ip - p_from_pe->imagebase, p_symbol->name,
 						from_ip - p_symbol->va, p_to_pe->name, to_ip - p_to_pe->imagebase, from_ip, to_ip);
 					}
@@ -1347,7 +1356,7 @@ bool rk_win_init_global()
 	LIST1_ADD(list_pes, &kernel_pe);
 	rk_win_protectpereadonlysections(&kernel_pe);
 	
-	rk_win_build_pe_base_filter();
+	//rk_win_build_pe_base_filter();
 	
 	LIST1_FOREACH (kernel_pe.list_sections, section) {
 		if((section->characteristics & IMAGE_SCN_MEM_EXECUTE) != 0)
@@ -1365,7 +1374,7 @@ bool rk_win_init_per_vcpu(void)
 		return true;
 	}
 
-	//rk_win_setdebugregister();
+	rk_win_setdebugregister();
 	printf("[RKAnalyzer]CPU %d Initialized.\n", get_cpu_id());
 	
 	return true;
@@ -1402,7 +1411,7 @@ vmmcall_rk_win_init (void)
 	//Our Temp DR dispatcher for OS booting detect
 	os_dep.dr_dispatcher_detectboot = rk_win_dr_dispatch_detectboot;
 	
-	printf("RKAnalyzer Windows Module Initialized...\n");
+	printf("[RKAnalyzer]RKAnalyzer Windows Module Initialized...\n");
 }
 
 static void
@@ -1411,10 +1420,10 @@ rk_win_set_detect_osboot (void)
 	//And we use DR1
 	rk_win_set_dr_to_virt(0, WIN_KERNEL_BSP_STARTUP_EIP);
 	rk_win_set_dr_to_virt(1, WIN_KERNEL_AP_STARTUP_EIP);
-	printf("OS Boot Detecting Setup ON CPU%d...\n", get_cpu_id());
+	printf("[CPU%d][RKAnalyzer]OS Boot Detecting Setup ON...\n", get_cpu_id());
 }
 
 INITFUNC ("vmmcal0", vmmcall_rk_win_init);
-INITFUNC ("vcpu0", rk_win_set_detect_osboot);
+INITFUNC ("vcpu1", rk_win_set_detect_osboot);
 
 #endif

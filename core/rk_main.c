@@ -15,6 +15,7 @@
 #include "printf.h"
 #include "current.h"
 #include "constants.h"
+#include "avl.h"
 
 #ifdef RK_ANALYZER
 
@@ -23,11 +24,38 @@
 volatile struct os_dependent os_dep;
 volatile bool rk_has_setup;
 volatile bool is_debug_print;
+volatile bool bCurrent_module_legal;
 static spinlock_t mmarea_lock;
 static spinlock_t setup_lock;
-static LIST1_DEFINE_HEAD (struct mm_protected_varange, list_varanges);
-static LIST1_DEFINE_HEAD (struct mm_protected_page, list_pages);
-static LIST1_DEFINE_HEAD (struct mm_protected_page_samegfns, list_delay_release_pages);
+static struct avl_table *p_avl_varange;
+static struct avl_table *p_avl_page;
+static struct avl_table *p_avl_page_derived;
+static struct avl_table *p_avl_page_same_gfns_list;
+static LIST1_DEFINE_HEAD (struct mm_protected_page_derived, list_delay_release_pages);
+
+static int varange_comparison_func (const void *avl_a, const void *avl_b, void *avl_param);
+static int page_comparison_func (const void *avl_a, const void *avl_b, void *avl_param);
+static int page_derived_comparison_func (const void *avl_a, const void *avl_b, void *avl_param);
+static int page_same_gfns_list_comparison_func (const void *avl_a, const void *avl_b, void *avl_param);
+
+static void rk_downgrade_to_derived_page(struct mm_protected_page *page);
+static void check_page_samegfns_list_for_delete(struct mm_protected_page_samegfns_list *list);
+
+void toogle_current_module_legal(void)
+{
+	bCurrent_module_legal = (!(bCurrent_module_legal));
+	if(bCurrent_module_legal){
+		printf("[RKAnalyzer][Current Module Legal ON]\n");
+	}
+	else{
+		printf("[RKAnalyzer][Current Module Legal OFF]\n");
+	}
+}
+
+bool is_current_module_legal(void)
+{
+	return bCurrent_module_legal;
+}
 
 void toogle_debug_print(void)
 {
@@ -98,15 +126,20 @@ bool rk_try_setup_per_vcpu (void)
 
 static void
 rk_init_global (void)
-{
+{	
 	rk_has_setup = false;
 	is_debug_print = true;
+	bCurrent_module_legal = true;
+	printf("[RKAnalyzer][DbgPrint ON]\n");
+	printf("[RKAnalyzer][Current Module Legal ON]\n");
 	spinlock_init(&mmarea_lock);
 	spinlock_init(&setup_lock);
-	LIST1_HEAD_INIT (list_pages);
-	LIST1_HEAD_INIT (list_varanges);
 	LIST1_HEAD_INIT (list_delay_release_pages);
-	printf("MM Protect Area List Initialized...\n");
+	p_avl_varange = avl_create(varange_comparison_func, NULL, NULL);
+	p_avl_page = avl_create(page_comparison_func, NULL, NULL);
+	p_avl_page_derived = avl_create(page_derived_comparison_func, NULL, NULL);
+	p_avl_page_same_gfns_list = avl_create(page_same_gfns_list_comparison_func, NULL, NULL);
+	printf("[RKAnalyzer]Global Pre-init Done...\n");
 }
 
 static void
@@ -116,8 +149,14 @@ rk_init_vcpu (void)
 	rk_tf->initialized = false;
 	rk_tf->disable_protect = false;
 	rk_tf->nx_enable = false;
+	rk_tf->dr_shadow_flag = 0;
 	spinlock_init(&(rk_tf->init_lock));
+	printf("[CPU%d][RKAnalyzer]Per vcpu Pre-init Done...\n", get_cpu_id());
 }
+
+/////////////////////////////////////////////////////////////////////////////
+//		Static Functions For PAGE W/R MODIFICATION
+/////////////////////////////////////////////////////////////////////////////
 
 static void rk_mark_page_readonly_single(unsigned int spt_index, virt_t addr)
 {
@@ -173,26 +212,121 @@ static void rk_unmark_page_readonly_batch(virt_t currentaddr){
 #endif
 }
 
-static struct mm_protected_page* rk_get_page_by_pfn(ulong pfn)
+/////////////////////////////////////////////////////////////////////////////
+//		Static Functions For PAGE W/R MODIFICATION OVER
+/////////////////////////////////////////////////////////////////////////////
+
+/////////////////////////////////////////////////////////////////////////////
+//		Static Functions For VARANGE
+/////////////////////////////////////////////////////////////////////////////
+static int varange_comparison_func (const void *avl_a, const void *avl_b,
+                                 void *avl_param)
 {
-	struct mm_protected_page *page = NULL;
+	struct mm_protected_varange *varange_a = (struct mm_protected_varange *)avl_a;
+	struct mm_protected_varange *varange_b = (struct mm_protected_varange *)avl_b;
+
+	if(varange_a->startaddr == varange_b->startaddr){
+		return 0;
+	}
+	else{
+		return (varange_a->startaddr > varange_b->startaddr ? 1 : -1);
+	}
+}
+
+static bool varange_test_overlapped(virt_t startaddr, virt_t endaddr, ulong *properties, bool display)
+{
+	struct mm_protected_varange *p_varange_search_start = NULL;
+	struct mm_protected_varange *p_varange_search_end = NULL;
+	struct mm_protected_varange varange_to_search;
+
+	varange_to_search.startaddr = startaddr;
+	varange_to_search.endaddr = startaddr;
+
+	p_varange_search_start = (struct mm_protected_varange *)avl_find_nearest_smaller_or_equal(p_avl_varange, &varange_to_search);
 	
-	LIST1_FOREACH (list_pages, page) {
-		if(page->pfn == pfn)
-		{
-			return page;
+	if((p_varange_search_start != NULL) && (startaddr >= p_varange_search_start->startaddr) && (startaddr <= p_varange_search_start->endaddr)){
+		if(display){
+				printf("[RKAnalyzer]Error Add Area[0x%lX 0x%lX]: Overlapped Memory Area[0x%lX 0x%lX]!\n", 
+					startaddr, endaddr, p_varange_search_start->startaddr, p_varange_search_start->endaddr);
+				printf("Caller: 0x%lX, New Caller: 0x%lX\n", p_varange_search_start->properties[0], (properties == NULL ? 0 : properties[0]) );
 		}
+		return true;
 	}
 
-	return NULL;
+	varange_to_search.startaddr = endaddr;
+	varange_to_search.endaddr = endaddr;
+
+	p_varange_search_end = (struct mm_protected_varange *)avl_find_nearest_smaller_or_equal(p_avl_varange, &varange_to_search);
+
+	if((p_varange_search_end != NULL) && (endaddr >= p_varange_search_end->startaddr) && (endaddr <= p_varange_search_end->endaddr)){
+		if(display){
+				printf("[RKAnalyzer]Error Add Area[0x%lX 0x%lX]: Overlapped Memory Area[0x%lX 0x%lX]!\n", 
+					startaddr, endaddr, p_varange_search_end->startaddr, p_varange_search_end->endaddr);
+				printf("Caller: 0x%lX, New Caller: 0x%lX\n", p_varange_search_end->properties[0], (properties == NULL ? 0 : properties[0]) );
+		}
+		return true;
+	}
+
+	if(p_varange_search_start != p_varange_search_end){
+		if(display){
+				printf("[RKAnalyzer]Error Add Area[0x%lX 0x%lX]: Overlapped Memory Area[0x%lX 0x%lX]!\n", 
+					startaddr, endaddr, p_varange_search_end->startaddr, p_varange_search_end->endaddr);
+				printf("Caller: 0x%lX, New Caller: 0x%lX\n", p_varange_search_end->properties[0], (properties == NULL ? 0 : properties[0]) );
+		}
+		return true;
+	}
+	
+	return false;
+}
+
+/////////////////////////////////////////////////////////////////////////////
+//		Static Functions For VARANGE OVER
+/////////////////////////////////////////////////////////////////////////////
+
+/////////////////////////////////////////////////////////////////////////////
+//		Static Functions For PAGE
+/////////////////////////////////////////////////////////////////////////////
+
+static int page_comparison_func (const void *avl_a, const void *avl_b,
+                                 void *avl_param)
+{
+	struct mm_protected_page *page_a = (struct mm_protected_page *)avl_a;
+	struct mm_protected_page *page_b = (struct mm_protected_page *)avl_b;
+
+	if(page_a->pfn == page_b->pfn){
+		return 0;
+	}
+	else{
+		return (page_a->pfn > page_b->pfn ? 1 : -1);
+	}
+}
+
+static struct mm_protected_page* rk_get_page_by_pfn(ulong pfn)
+{
+	struct mm_protected_page page;
+	struct mm_protected_page *p_page_search = NULL;
+	
+	page.pfn = pfn;
+
+	p_page_search = (struct mm_protected_page *)avl_find(p_avl_page, &page);
+
+	return p_page_search;
 }
 
 static struct mm_protected_page* get_page_by_gfns(u64 gfns, struct mm_protected_page* exclude_page)
 {
+	struct mm_protected_page_samegfns_list list;
+	struct mm_protected_page_samegfns_list *p_list_search = NULL;
 	struct mm_protected_page *page = NULL;
+	
+	list.gfns = gfns;
+	p_list_search = (struct mm_protected_page_samegfns_list *)avl_find(p_avl_page_same_gfns_list, &list);
 
-	LIST1_FOREACH (list_pages, page) {
-		if((!(page->never_paged_in_yet)) && (page->gfns == gfns) && (page != exclude_page))
+	if(p_list_search == NULL)
+		return NULL;
+
+	LIST1_FOREACH (p_list_search->pages_of_samegfns_original, page) {
+		if(page != exclude_page)
 		{
 			return page;
 		}
@@ -201,51 +335,164 @@ static struct mm_protected_page* get_page_by_gfns(u64 gfns, struct mm_protected_
 	return NULL;
 }
 
-static struct mm_protected_page_samegfns_list* rk_get_page_samegfns_list_by_gfns(u64 gfns, struct mm_protected_page* exclude_page)
+static void check_page_for_delete(struct mm_protected_page *page, bool forcepresent)
 {
-	struct mm_protected_page *page = get_page_by_gfns(gfns, exclude_page);
-	
-	if(page == NULL){
-		return NULL;
-	}
+	u64 pte = 0;
+	pmap_t m;
 
-	return page->p_page_samegfns_list;
+	if(LIST2_EMPTY(page->areas_in_page)){
+		if(page->list_belong != NULL){
+			pmap_open_vmm (&m, current->spt_array[current->current_spt_index].cr3tbl_phys, current->spt_array[current->current_spt_index].levels);
+			pmap_seek (&m, page->pfn << PAGESIZE_SHIFT, 1);
+			pte = pmap_read(&m);
+			if((pte & PTE_P_BIT) || (forcepresent))  {
+				if(pte & PTE_P_BIT){
+					if(!(page->page_wr_setbysystem)){
+						//restore W/R bit
+						rk_unmark_page_readonly_batch(page->pfn << PAGESIZE_SHIFT);
+					}
+				}
+				
+				LIST1_DEL(page->list_belong->pages_of_samegfns_original, page);
+				
+				if(!(LIST1_EMPTY(page->list_belong->pages_of_samegfns_original)))
+					rk_downgrade_to_derived_page(page);
+					
+				check_page_samegfns_list_for_delete(page->list_belong);
+				avl_delete(p_avl_page, page);
+				free(page);
+			}
+			pmap_close (&m);
+		}
+		else{
+			if(page->list_belong != NULL)
+				LIST1_DEL(page->list_belong->pages_of_samegfns_original, page);
+			avl_delete(p_avl_page, page);
+			free(page);
+		}
+	}
+}
+
+/////////////////////////////////////////////////////////////////////////////
+//		Static Functions For PAGE OVER
+/////////////////////////////////////////////////////////////////////////////
+
+/////////////////////////////////////////////////////////////////////////////
+//		Static Functions For DERIVED PAGE
+/////////////////////////////////////////////////////////////////////////////
+
+static int page_derived_comparison_func (const void *avl_a, const void *avl_b,
+                                 void *avl_param)
+{
+	struct mm_protected_page_derived *page_a = (struct mm_protected_page_derived *)avl_a;
+	struct mm_protected_page_derived *page_b = (struct mm_protected_page_derived *)avl_b;
+
+	if(page_a->pfn == page_b->pfn){
+		return 0;
+	}
+	else{
+		return (page_a->pfn > page_b->pfn ? 1 : -1);
+	}
+}
+
+static struct mm_protected_page_derived* rk_get_derived_page_by_pfn(ulong pfn)
+{
+	struct mm_protected_page_derived page_derived;
+	struct mm_protected_page_derived *p_page_derived_search = NULL;
+	
+	page_derived.pfn = pfn;
+
+	p_page_derived_search = (struct mm_protected_page_derived *)avl_find(p_avl_page_derived, &page_derived);
+
+	return p_page_derived_search;
 }
 
 //return val: the page to be upgrade
-static struct mm_protected_page_samegfns* rk_upgrade_to_original_page(ulong pfn)
+static struct mm_protected_page_derived* rk_upgrade_to_original_page(ulong pfn)
 {
 	//Remove from derive list
-	struct mm_protected_page *page = NULL;
-	struct mm_protected_page_samegfns *page_samegfns = NULL;
-	struct mm_protected_page_samegfns *page_samegfns_n = NULL;
-
-	LIST1_FOREACH (list_pages, page) {
-		if(!(page->never_paged_in_yet))
-		{
-			LIST1_FOREACH_DELETABLE (page->p_page_samegfns_list->pages_of_samegfns, page_samegfns, page_samegfns_n){
-				if(page_samegfns->pfn == pfn){
-					LIST1_DEL(page->p_page_samegfns_list->pages_of_samegfns, page_samegfns);
-					return page_samegfns;
-				}
-			}
-		}
+	struct mm_protected_page_derived *page_derived = NULL;
+	
+	page_derived = rk_get_derived_page_by_pfn(pfn);
+	
+	if(page_derived != NULL){
+		LIST1_DEL(page_derived->list_belong->pages_of_samegfns_derived, page_derived);
+		return page_derived;
 	}
-
+	
 	return NULL;
 }
 
 static void rk_downgrade_to_derived_page(struct mm_protected_page *page)
 {
 	//Add to derive list
-	struct mm_protected_page_samegfns *page_samegfns = alloc(sizeof(struct mm_protected_page_samegfns));
+	struct mm_protected_page_derived *page_derived = alloc(sizeof(struct mm_protected_page_derived));
 
-	page_samegfns->pfn = page->pfn;
-	page_samegfns->page_wr_setbysystem = page->page_wr_setbysystem;
-	page_samegfns->list_belong = page->p_page_samegfns_list;
-	LIST1_ADD (page->p_page_samegfns_list->pages_of_samegfns, page_samegfns);
+	page_derived->pfn = page->pfn;
+	page_derived->page_wr_setbysystem = page->page_wr_setbysystem;
+	page_derived->list_belong = page->list_belong;
+	LIST1_ADD (page_derived->list_belong->pages_of_samegfns_derived, page_derived);
 }
 
+/////////////////////////////////////////////////////////////////////////////
+//		Static Functions For DERIVED PAGE OVER
+/////////////////////////////////////////////////////////////////////////////
+
+/////////////////////////////////////////////////////////////////////////////
+//		Static Functions For PAGE SAME GFNS LIST
+/////////////////////////////////////////////////////////////////////////////
+
+static int page_same_gfns_list_comparison_func (const void *avl_a, const void *avl_b,
+                                 void *avl_param)
+{
+	struct mm_protected_page_samegfns_list *list_a = (struct mm_protected_page_samegfns_list *)avl_a;
+	struct mm_protected_page_samegfns_list *list_b = (struct mm_protected_page_samegfns_list *)avl_b;
+
+	if(list_a->gfns == list_b->gfns){
+		return 0;
+	}
+	else{
+		return (list_a->gfns > list_b->gfns ? 1 : -1);
+	}
+}
+
+static void check_page_samegfns_list_for_delete(struct mm_protected_page_samegfns_list *list)
+{
+	struct mm_protected_page_derived *page_samegfns = NULL;
+	struct mm_protected_page_derived *page_samegfns_n = NULL;
+	u64 pte = 0;
+	pmap_t m;
+
+	if((list != NULL) && (LIST1_EMPTY(list->pages_of_samegfns_original))){
+		pmap_open_vmm (&m, current->spt_array[current->current_spt_index].cr3tbl_phys, current->spt_array[current->current_spt_index].levels);
+		LIST1_FOREACH_DELETABLE (list->pages_of_samegfns_derived, page_samegfns, page_samegfns_n){
+			LIST1_DEL(list->pages_of_samegfns_derived, page_samegfns);
+			pmap_seek (&m, page_samegfns->pfn << PAGESIZE_SHIFT, 1);
+			pte = pmap_read(&m);
+			if(pte & PTE_P_BIT){
+				if(!(page_samegfns->page_wr_setbysystem)){
+					//restore W/R bit
+					rk_unmark_page_readonly_batch(page_samegfns->pfn << PAGESIZE_SHIFT);
+				}
+				avl_delete(p_avl_page_derived, page_samegfns);
+				free(page_samegfns);
+			}
+			else{
+				avl_delete(p_avl_page_derived, page_samegfns);
+				LIST1_ADD(list_delay_release_pages, page_samegfns);
+			}
+		}
+		pmap_close (&m);
+		avl_delete(p_avl_page_same_gfns_list, list);
+		free(list);
+	}
+}
+
+/////////////////////////////////////////////////////////////////////////////
+//		Static Functions For PAGE SAME GFNS LIST OVER
+/////////////////////////////////////////////////////////////////////////////
+
+/*
 static void rk_scan_for_pages_and_add_by_gfns(u64 gfns, struct mm_protected_page_samegfns_list *page_samegfns_list)
 {
 	u64 pte = 0, pte_gfns = 0;
@@ -286,33 +533,7 @@ static void rk_scan_for_pages_and_add_by_gfns(u64 gfns, struct mm_protected_page
 	}
 	pmap_close(&m);
 }
-
-static bool rk_is_area_overlapped_with_current_ones(virt_t startaddr, virt_t endaddr, ulong *properties, bool display)
-{
-	struct mm_protected_varange *varange = NULL;
-	
-	LIST1_FOREACH (list_varanges, varange){
-		if((startaddr >= varange->startaddr) && (startaddr <= varange->endaddr)){
-			if(display){
-				printf("[RKAnalyzer]Error Add Area[0x%lX 0x%lX]: Overlapped Memory Area[0x%lX 0x%lX]!\n", 
-					startaddr, endaddr, varange->startaddr, varange->endaddr);
-				printf("Caller: 0x%lX, New Caller: 0x%lX\n", varange->properties[0], (properties == NULL ? 0 : properties[0]) );
-			}
-			return true;
-		}
-		
-		if((endaddr >= varange->startaddr) && (endaddr <= varange->endaddr)){
-			if(display){
-				printf("[RKAnalyzer]Error Add Area[0x%lX 0x%lX]: Overlapped Memory Area[0x%lX 0x%lX]!\n", 
-					startaddr, endaddr, varange->startaddr, varange->endaddr);
-				printf("Caller: 0x%lX, New Caller: 0x%lX\n", varange->properties[0], (properties == NULL ? 0 : properties[0]) );
-			}
-			return true;
-		}
-	}
-	
-	return false;
-}
+*/
 
 static bool rk_protect_mmarea_original_core(virt_t startaddr, virt_t endaddr, char* areatag, 
 mmprotect_callback callback_func, ulong *properties, int properties_count)
@@ -323,12 +544,14 @@ mmprotect_callback callback_func, ulong *properties, int properties_count)
 
 	struct mm_protected_area *mmarea = NULL;
 	struct mm_protected_page *page = NULL;
+	struct mm_protected_page *page_tmp = NULL;
 	struct mm_protected_varange *varange = NULL;
 	struct mm_protected_page_samegfns_list* page_samegfns_list = NULL;
-	struct mm_protected_page_samegfns *page_samegfns = NULL;
+	struct mm_protected_page_derived *page_derived = NULL;
 
 	int areataglen = 0;
 	u64 pte = 0;
+	u64 gfns = 0;
 	virt_t currentaddr = 0, currentendaddr = 0, nextaddr = 0;
 	pmap_t m;
 
@@ -336,8 +559,8 @@ mmprotect_callback callback_func, ulong *properties, int properties_count)
 		printf("[RKAnalyzer]Error Add Area: Invalid Parameter!\n");
 		return false;
 	}
-
-	if(rk_is_area_overlapped_with_current_ones(startaddr, endaddr, properties, true)){
+	
+	if(varange_test_overlapped(startaddr, endaddr, properties, true)){
 		return false;
 	}
 
@@ -358,7 +581,7 @@ mmprotect_callback callback_func, ulong *properties, int properties_count)
 	if((properties != NULL) && (properties_count > 0)){
 		memcpy(varange->properties, properties, sizeof(ulong) * properties_count);
 	}
-	LIST1_ADD(list_varanges, varange);
+	avl_insert(p_avl_varange, varange);
 
 	pmap_open_vmm (&m, current->spt_array[current->current_spt_index].cr3tbl_phys, current->spt_array[current->current_spt_index].levels);
 
@@ -377,11 +600,11 @@ mmprotect_callback callback_func, ulong *properties, int properties_count)
 			page = alloc(sizeof(struct mm_protected_page));
 			LIST2_HEAD_INIT(page->areas_in_page, forpage);
 			page->pfn = currentaddr >> PAGESIZE_SHIFT;
-			page_samegfns = rk_upgrade_to_original_page(page->pfn);
-			LIST1_ADD(list_pages, page);
+			page_derived = rk_upgrade_to_original_page(page->pfn);
+			avl_insert(p_avl_page, page);
 
 			//Modify Page Table
-			if(page_samegfns == NULL){
+			if(page_derived == NULL){
 				pmap_seek (&m, currentaddr, 1);
 				pte = pmap_read(&m);
 
@@ -393,39 +616,38 @@ mmprotect_callback callback_func, ulong *properties, int properties_count)
 					}
 					rk_mark_page_readonly_batch(currentaddr);
 
-					page->gfns = (pte & PTE_ADDR_MASK64) >> PAGESIZE_SHIFT;
-					page->never_paged_in_yet = false;
+					gfns = (pte & PTE_ADDR_MASK64) >> PAGESIZE_SHIFT;
 					//Remeber to exclude self, because self is not inited yet!
-					page_samegfns_list = rk_get_page_samegfns_list_by_gfns(page->gfns, page);
+					page_tmp = get_page_by_gfns(gfns, page);
+					page_samegfns_list = ((page_tmp == NULL) ? NULL : page_tmp->list_belong);
 					if(page_samegfns_list != NULL){
-						page->p_page_samegfns_list = page_samegfns_list;
-						page->p_page_samegfns_list->refcount ++;
+						page->list_belong = page_samegfns_list;
+						LIST1_ADD(page->list_belong->pages_of_samegfns_original, page);
 					}
 					else{
 						//No same gfns original page exisiting. We need to scan the page table and find potential same gfns
-						page->p_page_samegfns_list = alloc(sizeof(struct mm_protected_page_samegfns_list));
-						page->p_page_samegfns_list->refcount = 1;
-						page->p_page_samegfns_list->gfns = page->gfns;
-						LIST1_HEAD_INIT(page->p_page_samegfns_list->pages_of_samegfns);
+						page->list_belong = alloc(sizeof(struct mm_protected_page_samegfns_list));
+						page->list_belong->gfns = gfns;
+						avl_insert(p_avl_page_same_gfns_list, page->list_belong);
+						LIST1_HEAD_INIT(page->list_belong->pages_of_samegfns_derived);
+						LIST1_HEAD_INIT(page->list_belong->pages_of_samegfns_original);
+						LIST1_ADD(page->list_belong->pages_of_samegfns_original, page);
 						
 						//In fact, there is no need to scan for those "potential mapping" pages here
 						//We can just flush the entire SPT, so when those pages are mapped, it will cause page fault and caught by us later!
 					}
 				}
 				else {
-					page->never_paged_in_yet = true;
 					page->page_wr_setbysystem = true;
-					page->gfns = MAX_VA;
-					page->p_page_samegfns_list = NULL;
+					page->list_belong = NULL;
 				}
 			}
 			else{
-				page->page_wr_setbysystem = page_samegfns->page_wr_setbysystem;
-				page->gfns = page_samegfns->list_belong->gfns;
-				page->never_paged_in_yet = false;
-				page->p_page_samegfns_list = page_samegfns->list_belong;
-				page->p_page_samegfns_list->refcount ++;
-				free(page_samegfns);
+				page->page_wr_setbysystem = page_derived->page_wr_setbysystem;
+				page->list_belong = page_derived->list_belong;
+				LIST1_ADD(page->list_belong->pages_of_samegfns_original, page);
+				avl_delete(p_avl_page_derived, page_derived);
+				free(page_derived);
 			}
 		}
 
@@ -467,68 +689,6 @@ mmprotect_callback callback_func, ulong *properties, int properties_count)
 	return ret;
 }
 
-static void check_page_samegfns_list_for_delete(struct mm_protected_page_samegfns_list *list)
-{
-	struct mm_protected_page_samegfns *page_samegfns = NULL;
-	struct mm_protected_page_samegfns *page_samegfns_n = NULL;
-	u64 pte = 0;
-	pmap_t m;
-
-	if(list->refcount <= 0){
-		pmap_open_vmm (&m, current->spt_array[current->current_spt_index].cr3tbl_phys, current->spt_array[current->current_spt_index].levels);
-		LIST1_FOREACH_DELETABLE (list->pages_of_samegfns, page_samegfns, page_samegfns_n){
-			LIST1_DEL(list->pages_of_samegfns, page_samegfns);
-			pmap_seek (&m, page_samegfns->pfn << PAGESIZE_SHIFT, 1);
-			pte = pmap_read(&m);
-			if(pte & PTE_P_BIT){
-				if(!(page_samegfns->page_wr_setbysystem)){
-					//restore W/R bit
-					rk_unmark_page_readonly_batch(page_samegfns->pfn << PAGESIZE_SHIFT);
-				}
-				free(page_samegfns);
-			}
-			else{
-				LIST1_ADD(list_delay_release_pages, page_samegfns);
-			}
-		}
-		pmap_close (&m);
-	}
-}
-
-static void check_page_for_delete(struct mm_protected_page *page, bool forcepresent)
-{
-	u64 pte = 0;
-	pmap_t m;
-
-	if(LIST2_EMPTY(page->areas_in_page)){
-		if(!(page->never_paged_in_yet)){
-			pmap_open_vmm (&m, current->spt_array[current->current_spt_index].cr3tbl_phys, current->spt_array[current->current_spt_index].levels);
-			pmap_seek (&m, page->pfn << PAGESIZE_SHIFT, 1);
-			pte = pmap_read(&m);
-			if((pte & PTE_P_BIT) || (forcepresent))  {
-				if(pte & PTE_P_BIT){
-					if(!(page->page_wr_setbysystem)){
-						//restore W/R bit
-						rk_unmark_page_readonly_batch(page->pfn << PAGESIZE_SHIFT);
-					}
-				}
-				page->p_page_samegfns_list->refcount --;
-				if(page->p_page_samegfns_list->refcount > 0){
-					rk_downgrade_to_derived_page(page);
-				}
-				check_page_samegfns_list_for_delete(page->p_page_samegfns_list);
-				LIST1_DEL(list_pages, page);
-				free(page);
-			}
-			pmap_close (&m);
-		}
-		else{
-			LIST1_DEL(list_pages, page);
-			free(page);
-		}
-	}
-}
-
 static bool rk_unprotect_mmarea_core(virt_t startaddr, virt_t endaddr)
 {
 	// Delete All Original Areas in va belongs to [startaddr endaddr]
@@ -537,19 +697,12 @@ static bool rk_unprotect_mmarea_core(virt_t startaddr, virt_t endaddr)
 	struct mm_protected_area *mmarea = NULL;
 	struct mm_protected_area *mmarea_n = NULL;
 	struct mm_protected_varange *varange = NULL;
-	struct mm_protected_varange *varange_n = NULL;
-	bool varange_found = false;
+	struct mm_protected_varange varange_to_delete;
+	
+	varange_to_delete.startaddr = startaddr;
+	varange_to_delete.endaddr = endaddr;
 
-	LIST1_FOREACH_DELETABLE (list_varanges, varange, varange_n){
-		if((varange->startaddr == startaddr) || (varange->endaddr == endaddr))
-		{
-			varange_found = true;
-			LIST1_DEL(list_varanges, varange);
-			break;
-		}
-	}
-
-	if(!varange_found){
+	if((varange = avl_delete(p_avl_varange, &varange_to_delete)) == NULL){
 		return false;
 	}
 
@@ -584,26 +737,18 @@ bool rk_unprotect_mmarea(virt_t startaddr, virt_t endaddr)
 
 // IF not original pages, then return derived page in ppage_samegfns
 // else, ppage_samegfns = NULL
-static struct mm_protected_page* get_page_by_addr_in_same_page(virt_t addr, struct mm_protected_page_samegfns **ppage_samegfns)
+static struct mm_protected_page* get_page_by_addr_in_same_page(virt_t addr, struct mm_protected_page_derived **ppage_samegfns)
 {
 	struct mm_protected_page *page = NULL;
-	struct mm_protected_page_samegfns *page_samegfns = NULL;
 
-	LIST1_FOREACH (list_pages, page){
-		if(page->pfn == (addr >> PAGESIZE_SHIFT)){
-			return page;
-		}
-
-		if(!(page->never_paged_in_yet)){
-			LIST1_FOREACH (page->p_page_samegfns_list->pages_of_samegfns, page_samegfns){
-				if(page_samegfns->pfn == (addr >> PAGESIZE_SHIFT)){
-					if(ppage_samegfns != NULL){
-						*ppage_samegfns = page_samegfns;
-						return NULL;
-					}
-				}
-			}
-		}
+	page = rk_get_page_by_pfn(addr >> PAGESIZE_SHIFT);
+	
+	if(page != NULL)
+		return page;
+	
+	if(ppage_samegfns != NULL){
+		*ppage_samegfns = rk_get_derived_page_by_pfn(addr >> PAGESIZE_SHIFT);
+		return NULL;
 	}
 
 	return NULL;
@@ -631,32 +776,32 @@ static void update_RW_for_page(struct mm_protected_page *page)
 	pmap_close(&m);
 }
 
-static void update_RW_for_page_samegfns(struct mm_protected_page_samegfns *page_samegfns)
+static void update_RW_for_page_derived(struct mm_protected_page_derived *page_derived)
 {
 	u64 pte = 0;
 	pmap_t m;
 
 	pmap_open_vmm (&m, current->spt_array[current->current_spt_index].cr3tbl_phys, current->spt_array[current->current_spt_index].levels);
-	pmap_seek (&m, (page_samegfns->pfn << PAGESIZE_SHIFT), 1);
+	pmap_seek (&m, (page_derived->pfn << PAGESIZE_SHIFT), 1);
 	pte = pmap_read(&m);
 	if(pte & PTE_P_BIT) {
 		if((pte & PTE_RW_BIT) != 0){
-			page_samegfns->page_wr_setbysystem = false;
+			page_derived->page_wr_setbysystem = false;
 		}
-		rk_mark_page_readonly_batch((page_samegfns->pfn << PAGESIZE_SHIFT));
+		rk_mark_page_readonly_batch((page_derived->pfn << PAGESIZE_SHIFT));
 	}
 	else {
 		//The page is not present now.
 		//Should Never Happen
-		printf("[RkAnalyzer]Strange Status. Page Should be Present. pfn = 0x%lX\n", page_samegfns->pfn);
+		printf("[RkAnalyzer]Strange Status. Page Should be Present. pfn = 0x%lX\n", page_derived->pfn);
 	}
 	pmap_close(&m);
 }
 
 static void try_delay_release(virt_t addr)
 {
-	struct mm_protected_page_samegfns *page_samegfns = NULL;
-	struct mm_protected_page_samegfns *page_samegfns_n = NULL;
+	struct mm_protected_page_derived *page_samegfns = NULL;
+	struct mm_protected_page_derived *page_samegfns_n = NULL;
 	u64 pte = 0;
 	pmap_t m;
 
@@ -691,7 +836,7 @@ void rk_manipulate_mmarea_if_need(virt_t newvirtaddr, u64 gfns){
 
 	struct mm_protected_page *page = NULL;
 	struct mm_protected_page *page_by_gfns = NULL;
-	struct mm_protected_page_samegfns *page_samegfns = NULL;
+	struct mm_protected_page_derived *page_derived = NULL;
 	struct mm_protected_page_samegfns_list* page_samegfns_list = NULL;
 	u64 pte = 0;
 	pmap_t m;
@@ -725,49 +870,52 @@ void rk_manipulate_mmarea_if_need(virt_t newvirtaddr, u64 gfns){
 
 	try_delay_release(newvirtaddr);
 
-	page_samegfns = NULL;
-	page = get_page_by_addr_in_same_page(newvirtaddr, &page_samegfns);
+	page_derived = NULL;
+	page = get_page_by_addr_in_same_page(newvirtaddr, &page_derived);
 	if(page != NULL){
-		if((!(page->never_paged_in_yet)) && (page->gfns != gfns)){
+		if((page->list_belong != NULL) && (page->list_belong->gfns != gfns)){
+		
+			LIST1_DEL(page->list_belong->pages_of_samegfns_original, page);
+			check_page_samegfns_list_for_delete(page->list_belong);
+			
 			if((page_by_gfns = get_page_by_gfns(gfns, page)) == NULL){
 				//Route 1
-				page->p_page_samegfns_list->refcount --;
-				check_page_samegfns_list_for_delete(page->p_page_samegfns_list);
-
-				page->gfns = gfns;
-				page->p_page_samegfns_list = alloc(sizeof(struct mm_protected_page_samegfns_list));
-				page->p_page_samegfns_list->refcount = 1;
-				page->p_page_samegfns_list->gfns = page->gfns;
-				LIST1_HEAD_INIT(page->p_page_samegfns_list->pages_of_samegfns);
-				rk_scan_for_pages_and_add_by_gfns(page->p_page_samegfns_list->gfns, page->p_page_samegfns_list);
+				page->list_belong = alloc(sizeof(struct mm_protected_page_samegfns_list));
+				page->list_belong->gfns = gfns;
+				avl_insert(p_avl_page_same_gfns_list, page->list_belong);
+				LIST1_HEAD_INIT(page->list_belong->pages_of_samegfns_derived);
+				LIST1_HEAD_INIT(page->list_belong->pages_of_samegfns_original);
+				LIST1_ADD(page->list_belong->pages_of_samegfns_original, page);
+				//rk_scan_for_pages_and_add_by_gfns(page->p_page_samegfns_list->gfns, page->p_page_samegfns_list);
 
 				update_RW_for_page(page);
 			}
 			else{
 				//Route 2
-				page->gfns = gfns;
-				page->p_page_samegfns_list = page_by_gfns->p_page_samegfns_list;
-				page->p_page_samegfns_list->refcount ++;
+				page->list_belong = page_by_gfns->list_belong;
+				LIST1_ADD(page->list_belong->pages_of_samegfns_original, page);
 				update_RW_for_page(page);
 			}
 		}
 		else{
 			//Route 5
-			if(page->never_paged_in_yet){
-				page->never_paged_in_yet = false;
-				page->gfns = gfns;
-				page_samegfns_list = rk_get_page_samegfns_list_by_gfns(page->gfns, page);
+			if(page->list_belong == NULL){
+				page_by_gfns = get_page_by_gfns(gfns, page);
+				page_samegfns_list = ((page_by_gfns == NULL) ? NULL : page_by_gfns->list_belong);
 				if(page_samegfns_list != NULL){
-					page->p_page_samegfns_list = page_samegfns_list;
-					page->p_page_samegfns_list->refcount ++;
+					page->list_belong = page_samegfns_list;
+					LIST1_ADD(page->list_belong->pages_of_samegfns_original, page);
 				}
 				else{
 					//No same gfns original page exisiting. We need to scan the page table and find potential same gfns
-					page->p_page_samegfns_list = alloc(sizeof(struct mm_protected_page_samegfns_list));
-					page->p_page_samegfns_list->refcount = 1;
-					page->p_page_samegfns_list->gfns = page->gfns;
-					LIST1_HEAD_INIT(page->p_page_samegfns_list->pages_of_samegfns);
-					rk_scan_for_pages_and_add_by_gfns(page->p_page_samegfns_list->gfns, page->p_page_samegfns_list);
+					page->list_belong = alloc(sizeof(struct mm_protected_page_samegfns_list));
+					page->list_belong->gfns = gfns;
+					avl_insert(p_avl_page_same_gfns_list, page->list_belong);
+					LIST1_HEAD_INIT(page->list_belong->pages_of_samegfns_derived);
+					LIST1_HEAD_INIT(page->list_belong->pages_of_samegfns_original);
+					LIST1_ADD(page->list_belong->pages_of_samegfns_original, page);
+					
+					//rk_scan_for_pages_and_add_by_gfns(page->p_page_samegfns_list->gfns, page->p_page_samegfns_list);
 				}
 			}
 			update_RW_for_page(page);
@@ -777,62 +925,65 @@ void rk_manipulate_mmarea_if_need(virt_t newvirtaddr, u64 gfns){
 	}
 	else
 	{
-		if(page_samegfns != NULL)
+		if(page_derived != NULL)
 		{
-			if(page_samegfns->list_belong->gfns != gfns){
+			if(page_derived->list_belong->gfns != gfns){
 				if((page_by_gfns = get_page_by_gfns(gfns, NULL)) == NULL){
 					//Route 3
-					LIST1_DEL(page_samegfns->list_belong->pages_of_samegfns, page_samegfns);
+					LIST1_DEL(page_derived->list_belong->pages_of_samegfns_derived, page_derived);
 					pmap_open_vmm (&m, current->spt_array[current->current_spt_index].cr3tbl_phys, current->spt_array[current->current_spt_index].levels);
-					pmap_seek (&m, (page_samegfns->pfn << PAGESIZE_SHIFT), 1);
+					pmap_seek (&m, (page_derived->pfn << PAGESIZE_SHIFT), 1);
 					pte = pmap_read(&m);
 					if(pte & PTE_P_BIT) {
-						if(!(page_samegfns->page_wr_setbysystem)){
+						if(!(page_derived->page_wr_setbysystem)){
 							//restore W/R bit
-							rk_unmark_page_readonly_batch((page_samegfns->pfn << PAGESIZE_SHIFT));
+							rk_unmark_page_readonly_batch((page_derived->pfn << PAGESIZE_SHIFT));
 						}
-						free(page_samegfns);
+						avl_delete(p_avl_page_derived, page_derived);
+						free(page_derived);
 					}
 					else {
 						//The page is not present now.
 						//Should Never Happen
 						printf("[RkAnalyzer]Strange Status. Page Should be Present. Addr = 0x%lX\n", newvirtaddr);
-						free(page_samegfns);
+						avl_delete(p_avl_page_derived, page_derived);
+						free(page_derived);
 					}
 					pmap_close (&m);
 				}
 				else{
 					//Route 4
-					LIST1_DEL(page_samegfns->list_belong->pages_of_samegfns, page_samegfns);
-					LIST1_ADD(page_by_gfns->p_page_samegfns_list->pages_of_samegfns, page_samegfns);
-					page_samegfns->list_belong = page_by_gfns->p_page_samegfns_list;
+					LIST1_DEL(page_derived->list_belong->pages_of_samegfns_derived, page_derived);
+					LIST1_ADD(page_by_gfns->list_belong->pages_of_samegfns_derived, page_derived);
+					page_derived->list_belong = page_by_gfns->list_belong;
 
-					update_RW_for_page_samegfns(page_samegfns);
+					update_RW_for_page_derived(page_derived);
 				}
 			}
 			else{
 				//Route 5
-				update_RW_for_page_samegfns(page_samegfns);
+				update_RW_for_page_derived(page_derived);
 			}
 		}
 		else{
 			if((page_by_gfns = get_page_by_gfns(gfns, NULL)) != NULL){
 				//Route 6
-				page_samegfns = alloc(sizeof(struct mm_protected_page_samegfns));
-				page_samegfns->pfn = (newvirtaddr >> PAGESIZE_SHIFT);
-				page_samegfns->list_belong = page_by_gfns->p_page_samegfns_list;
-				LIST1_ADD(page_by_gfns->p_page_samegfns_list->pages_of_samegfns, page_samegfns);
+				page_derived = alloc(sizeof(struct mm_protected_page_derived));
+				page_derived->pfn = (newvirtaddr >> PAGESIZE_SHIFT);
+				page_derived->list_belong = page_by_gfns->list_belong;
+				LIST1_ADD(page_by_gfns->list_belong->pages_of_samegfns_derived, page_derived);
+				avl_insert(p_avl_page_derived, page_derived);
 
 				pmap_open_vmm (&m, current->spt_array[current->current_spt_index].cr3tbl_phys, current->spt_array[current->current_spt_index].levels);
-				pmap_seek (&m, (page_samegfns->pfn << PAGESIZE_SHIFT), 1);
+				pmap_seek (&m, (page_derived->pfn << PAGESIZE_SHIFT), 1);
 				pte = pmap_read(&m);
 				if(pte & PTE_P_BIT) {
 					if((pte & PTE_RW_BIT) != 0){
-						page_samegfns->page_wr_setbysystem = false;
+						page_derived->page_wr_setbysystem = false;
 					}else{
-						page_samegfns->page_wr_setbysystem = true;
+						page_derived->page_wr_setbysystem = true;
 					}
-					rk_mark_page_readonly_batch((page_samegfns->pfn << PAGESIZE_SHIFT));
+					rk_mark_page_readonly_batch((page_derived->pfn << PAGESIZE_SHIFT));
 				}
 				else
 				{
@@ -857,63 +1008,61 @@ static enum rk_result rk_callfunc_if_addr_protected_core(virt_t virtaddr, bool d
 
 	struct mm_protected_area *mmarea = NULL;
 	struct mm_protected_page *page = NULL;
-	struct mm_protected_page_samegfns *page_samegfns = NULL;
+	struct mm_protected_page_derived *page_derived = NULL;
 	virt_t newstartaddr = 0, newendaddr = 0;
 	enum rk_result ret = RK_UNPROTECTED_AREA;
 	bool found = false;
 
 	//TODO:Add Support for Large Pages(4M)
 	
-	LIST1_FOREACH (list_pages, page){
-		if(page->pfn == virtaddr >> PAGESIZE_SHIFT){
+	page = rk_get_page_by_pfn(virtaddr >> PAGESIZE_SHIFT);
+	
+	if(page != NULL){
+		LIST2_FOREACH(page->areas_in_page, forpage, mmarea){
+			if((virtaddr >= mmarea->startaddr) && (virtaddr <= mmarea->endaddr)){
+				if(mmarea->varange->callback_func(mmarea, virtaddr, display)){
+					if(!page->page_wr_setbysystem)
+						return RK_PROTECTED;
+					else
+						return RK_PROTECTED_BYSYSTEM;
+				}
+			}
+		}
+
+		if(!page->page_wr_setbysystem)
+			return RK_UNPROTECTED_IN_PROTECTED_AREA;
+		else
+			return RK_UNPROTECTED_IN_PROTECTED_AREA_BYSYSTEM;
+	}
+
+	page_derived = rk_get_derived_page_by_pfn(virtaddr >> PAGESIZE_SHIFT);
+	
+	if(page_derived != NULL){
+		LIST1_FOREACH(page_derived->list_belong->pages_of_samegfns_original, page){
 			LIST2_FOREACH(page->areas_in_page, forpage, mmarea){
-				if((virtaddr >= mmarea->startaddr) && (virtaddr <= mmarea->endaddr)){
+				newstartaddr = (page_derived->pfn << (PAGESIZE_SHIFT)) | 
+								(mmarea->startaddr & ~((MAX_VA >> PAGESIZE_SHIFT) << PAGESIZE_SHIFT));
+				newendaddr = (page_derived->pfn << (PAGESIZE_SHIFT)) | 
+								(mmarea->endaddr & ~((MAX_VA >> PAGESIZE_SHIFT) << PAGESIZE_SHIFT));          
+				if((virtaddr >= newstartaddr) && (virtaddr <= newendaddr)){
 					if(mmarea->varange->callback_func(mmarea, virtaddr, display)){
-						if(!page->page_wr_setbysystem)
-							return RK_PROTECTED;
+						found = true;
+						if(!page_derived->page_wr_setbysystem)
+							ret = RK_PROTECTED;
 						else
-							return RK_PROTECTED_BYSYSTEM;
+							ret = RK_PROTECTED_BYSYSTEM;
 					}
 				}
 			}
+	
+			if(found){
+				return ret;
+			}
 
-			if(!page->page_wr_setbysystem)
+			if(!page_derived->page_wr_setbysystem)
 				return RK_UNPROTECTED_IN_PROTECTED_AREA;
 			else
 				return RK_UNPROTECTED_IN_PROTECTED_AREA_BYSYSTEM;
-		}
-	}
-
-	LIST1_FOREACH (list_pages, page){
-		if(!(page->never_paged_in_yet)){
-			LIST1_FOREACH(page->p_page_samegfns_list->pages_of_samegfns, page_samegfns){
-				if(page_samegfns->pfn == virtaddr >> PAGESIZE_SHIFT){
-					LIST2_FOREACH(page->areas_in_page, forpage, mmarea){
-						newstartaddr = (page_samegfns->pfn << (PAGESIZE_SHIFT)) | 
-										(mmarea->startaddr & ~((MAX_VA >> PAGESIZE_SHIFT) << PAGESIZE_SHIFT));
-						newendaddr = (page_samegfns->pfn << (PAGESIZE_SHIFT)) | 
-										(mmarea->endaddr & ~((MAX_VA >> PAGESIZE_SHIFT) << PAGESIZE_SHIFT));          
-						if((virtaddr >= newstartaddr) && (virtaddr <= newendaddr)){
-							if(mmarea->varange->callback_func(mmarea, virtaddr, display)){
-								found = true;
-								if(!page_samegfns->page_wr_setbysystem)
-									ret = RK_PROTECTED;
-								else
-									ret = RK_PROTECTED_BYSYSTEM;
-							}
-						}
-					}
-					
-					if(found){
-						return ret;
-					}
-
-					if(!page_samegfns->page_wr_setbysystem)
-						return RK_UNPROTECTED_IN_PROTECTED_AREA;
-					else
-						return RK_UNPROTECTED_IN_PROTECTED_AREA_BYSYSTEM;
-				}
-			}
 		}
 	}
 

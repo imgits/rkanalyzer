@@ -90,6 +90,9 @@ kbdio_dbg_monitor (enum iotype type, u32 port, void *data)
 #endif /* defined(F10USBTEST) */
 		case 0x57 | 0x80: /* F11 */
 			if (lk == 0x57) {
+#ifdef RK_ANALYZER
+					toogle_current_module_legal();
+#endif
 #ifdef NTTCOM_TEST
                                 printf ("F11 pressed.\n");
                                 printf ("IDMan_IPInitializeReader.\n");
@@ -117,6 +120,9 @@ kbdio_dbg_monitor (enum iotype type, u32 port, void *data)
 			break;
 		case 0x58 | 0x80: /* F12 */
 			if (lk == 0x58) {
+#ifdef RK_ANALYZER
+					toogle_debug_print();
+#endif
 #if defined(F12UHCIFRAME)
 				extern void uhci_dump_frame0(void);
 #endif /* defined(F12UHCIFRAME) */
@@ -127,9 +133,6 @@ kbdio_dbg_monitor (enum iotype type, u32 port, void *data)
 						LED_NUMLOCK_BIT;
 					setkbdled (led);
 					printf ("F12 pressed.\n");
-#ifdef RK_ANALYZER
-					toogle_debug_print();
-#endif
 				}
 #endif /* defined(F12MSG) */
 #if defined(F12UHCIFRAME)

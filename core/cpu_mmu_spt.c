@@ -2510,7 +2510,10 @@ cpu_mmu_spt_pagefault (ulong err, ulong cr2)
 #endif
 		}
 		mmio_unlock ();
-		current->vmctl.event_virtual ();
+		
+		if(!(p_rk_tf->tf))
+			current->vmctl.event_virtual ();
+			
 		break;
 	default:
 		panic ("unknown err");
