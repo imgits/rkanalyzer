@@ -81,30 +81,29 @@ struct mm_protected_varange{
 	ulong properties[PROPERTY_MAX];			//properties
 };
 
-struct mm_protected_page_samegfns{
-	LIST1_DEFINE (struct mm_protected_page_samegfns);
+struct mm_protected_page_samegfns_list;
+
+struct mm_protected_page_derived{
+	LIST1_DEFINE (struct mm_protected_page_derived);
+	ulong	pfn;								//Page Frame Number; this should never changed after initialized
+	struct mm_protected_page_samegfns_list *list_belong;			//The List this derived page belong to
+	bool 	page_wr_setbysystem;						//Is the wr bit set by us or the system
+};
+
+// A Protected Page. It may contain many protected areas.
+struct mm_protected_page{
+	LIST1_DEFINE (struct mm_protected_page);
+	LIST2_DEFINE_HEAD (areas_in_page, struct mm_protected_area, forpage);	//areas list; when this list is empty, we delete this page from our list
+										//and restore the W/R flag according to whether it had been set by system
 	ulong	pfn;								//Page Frame Number; this should never changed after initialized
 	struct mm_protected_page_samegfns_list *list_belong;			//The List this derived page belong to
 	bool 	page_wr_setbysystem;						//Is the wr bit set by us or the system
 };
 
 struct mm_protected_page_samegfns_list{
-	LIST1_DEFINE_HEAD (struct mm_protected_page_samegfns, pages_of_samegfns);
+	LIST1_DEFINE_HEAD (struct mm_protected_page_derived, pages_of_samegfns_derived);
+	LIST1_DEFINE_HEAD (struct mm_protected_page, pages_of_samegfns_original);
 	u64 gfns;								//physical mem frame number
-	ulong refcount;								//reference count; when use by original page, add by 1; when original
-										//page deleted or remapped, reduce by 1.
-};
-
-// A Protected Page. It may contain many protected areas.
-struct mm_protected_page{
-	LIST1_DEFINE (struct mm_protected_page);
-	struct mm_protected_page_samegfns_list *p_page_samegfns_list;		//Original Page with the same gfns share the same list;
-	LIST2_DEFINE_HEAD (areas_in_page, struct mm_protected_area, forpage);	//areas list; when this list is empty, we delete this page from our list
-										//and restore the W/R flag according to whether it had been set by system
-	ulong	pfn;								//Page Frame Number; this should never changed after initialized
-	u64	gfns;								//physical mem frame number
-	bool	never_paged_in_yet;						//has never paged in yet;
-	bool 	page_wr_setbysystem;						//Is the wr bit set by us or the system
 };
 
 /*
@@ -168,6 +167,9 @@ void rk_entry_before_tf(void);
 // Common Routines
 bool rk_try_setup_global(os_dependent_setter os_dep_setter);
 bool rk_try_setup_per_vcpu(void);
+
+void toogle_current_module_legal(void);
+bool is_current_module_legal(void);
 
 void toogle_debug_print(void);
 bool is_debug(void);

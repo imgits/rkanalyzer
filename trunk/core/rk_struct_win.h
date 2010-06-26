@@ -11,7 +11,7 @@
 
 #define WIN_KERNEL_BASE			0x80800000
 #define WIN_KERNEL_BSP_STARTUP_EIP	(WIN_KERNEL_BASE + 0x2211fc)
-#define WIN_KERNEL_AP_STARTUP_EIP	(WIN_KERNEL_BASE + 0x2211fc)
+#define WIN_KERNEL_AP_STARTUP_EIP	(WIN_KERNEL_BASE + 0x221523)
 
 typedef struct _IMAGE_DOS_HEADER {      // DOS .EXE header
     u16   e_magic;                     // Magic number

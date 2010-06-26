@@ -68,9 +68,15 @@ vt_panic_dump (void)
 	printf ("ss=0x%X ", current->u.vt.vr.sw.ss);
 	printf ("ds=0x%X ", current->u.vt.vr.sw.ds);
 	printf ("fs=0x%X ", current->u.vt.vr.sw.fs);
-	printf ("gs=0x%X", current->u.vt.vr.sw.gs);
+	printf ("gs=0x%X\n", current->u.vt.vr.sw.gs);
 	asm volatile ("mov %%db0, %0" : "=r"(tmp));
 	printf ("dr0=%08lX ", tmp);
+	asm volatile ("mov %%db1, %0" : "=r"(tmp));
+	printf ("dr1=%08lX ", tmp);
+	asm volatile ("mov %%db2, %0" : "=r"(tmp));
+	printf ("dr2=%08lX ", tmp);
+	asm volatile ("mov %%db3, %0" : "=r"(tmp));
+	printf ("dr3=%08lX ", tmp);
 	asm_vmread(VMCS_GUEST_DR7, &tmp);
 	printf ("dr7=%08lX\n", tmp);
 }
